@@ -29,7 +29,10 @@ import com.echoshield.echonode.service.AudioSensorService
 import com.echoshield.echonode.ui.BarricadeScreen
 import com.echoshield.echonode.ui.DashboardScreen
 import com.echoshield.echonode.ui.EvacuateScreen
+import com.echoshield.echonode.ui.IncidentReportScreen
+import com.echoshield.echonode.ui.LocationConfirmationScreen
 import com.echoshield.echonode.ui.PermissionRequestScreen
+import com.echoshield.echonode.ui.SafetyCheckScreen
 import com.echoshield.echonode.ui.theme.EchoNodeTheme
 import com.echoshield.echonode.viewmodel.MainViewModel
 
@@ -128,6 +131,43 @@ fun EchoShieldRoot() {
                     onSimulateGunshot = { viewModel.triggerManualDebugAlert() },
                     onToggleEvacuate = { viewModel.triggerEvacuate() },
                     onThresholdChange = { viewModel.setDetectionThreshold(it) },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            AppState.LOCATION_CONFIRMATION.name -> {
+                LocationConfirmationScreen(
+                    locationLabel = uiState.locationLabel,
+                    locationTimestamp = uiState.locationTimestamp,
+                    onConfirm = { isConfirmed -> viewModel.confirmLocation(isConfirmed) },
+                    onQuickBarricade = { viewModel.quickBarricade() },
+                    onQuickEvacuate = { viewModel.quickEvacuate() },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            AppState.SAFETY_CHECK.name -> {
+                SafetyCheckScreen(
+                    selectedStatus = uiState.safetyStatus,
+                    onStatusSelected = { status -> viewModel.selectSafetyStatus(status) },
+                    onNext = { viewModel.continueToIncidentReport() },
+                    onQuickBarricade = { viewModel.quickBarricade() },
+                    onQuickEvacuate = { viewModel.quickEvacuate() },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            AppState.INCIDENT_REPORT.name -> {
+                IncidentReportScreen(
+                    locationLabel = uiState.locationLabel,
+                    locationTimestamp = uiState.locationTimestamp,
+                    safetyStatus = uiState.safetyStatus,
+                    companionsCount = uiState.companionsCount,
+                    injuredCount = uiState.injuredCount,
+                    incidentNotes = uiState.incidentNotes,
+                    onCompanionsChange = { count -> viewModel.setCompanionsCount(count) },
+                    onInjuredChange = { count -> viewModel.setInjuredCount(count) },
+                    onNotesChange = { notes -> viewModel.setIncidentNotes(notes) },
+                    onSubmit = { viewModel.submitIncidentReport() },
+                    onQuickBarricade = { viewModel.quickBarricade() },
+                    onQuickEvacuate = { viewModel.quickEvacuate() },
                     modifier = Modifier.fillMaxSize()
                 )
             }

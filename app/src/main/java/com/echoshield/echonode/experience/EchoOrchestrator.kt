@@ -3,6 +3,7 @@ package com.echoshield.echonode.experience
 import com.echoshield.echonode.core.contracts.AppState
 import com.echoshield.echonode.core.contracts.EchoUiState
 import com.echoshield.echonode.core.contracts.MeshGateway
+import com.echoshield.echonode.core.contracts.SafetyStatus
 import com.echoshield.echonode.core.contracts.SensorGateway
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -57,7 +58,7 @@ class EchoOrchestrator(
     fun setDetectionThreshold(threshold: Double) = sensorGateway.setDetectionThreshold(threshold)
 
     fun triggerManualDebugAlert() {
-        transitionToBarricade()
+        transitionToIncidentFlow()
         meshGateway.broadcastThreat(_uiState.value.threatZone)
     }
 
@@ -74,17 +75,67 @@ class EchoOrchestrator(
             AppState.BARRICADE -> triggerEvacuate()
             AppState.EVACUATE -> transitionToBarricade()
             AppState.LISTENING -> transitionToBarricade()
+            AppState.LOCATION_CONFIRMATION -> transitionToBarricade()
+            AppState.SAFETY_CHECK -> transitionToBarricade()
+            AppState.INCIDENT_REPORT -> transitionToBarricade()
         }
     }
 
     fun resetAlert() {
-        _uiState.value = _uiState.value.copy(appState = AppState.LISTENING)
+        _uiState.value = _uiState.value.copy(
+            appState = AppState.LISTENING,
+            locationConfirmed = false,
+            safetyStatus = SafetyStatus.UNKNOWN,
+            companionsCount = 0,
+            injuredCount = 0,
+            incidentNotes = ""
+        )
         meshGateway.broadcastAllClear()
+    }
+
+    fun confirmLocation(isConfirmed: Boolean) {
+        _uiState.value = _uiState.value.copy(
+            appState = AppState.SAFETY_CHECK,
+            locationConfirmed = isConfirmed
+        )
+    }
+
+    fun setSafetyStatus(status: SafetyStatus) {
+        _uiState.value = _uiState.value.copy(safetyStatus = status)
+    }
+
+    fun continueToIncidentReport() {
+        _uiState.value = _uiState.value.copy(appState = AppState.INCIDENT_REPORT)
+    }
+
+    fun setCompanionsCount(count: Int) {
+        _uiState.value = _uiState.value.copy(companionsCount = count.coerceAtLeast(0))
+    }
+
+    fun setInjuredCount(count: Int) {
+        _uiState.value = _uiState.value.copy(injuredCount = count.coerceAtLeast(0))
+    }
+
+    fun setIncidentNotes(notes: String) {
+        _uiState.value = _uiState.value.copy(incidentNotes = notes)
+    }
+
+    fun submitIncidentReport() {
+        meshGateway.broadcastThreat(_uiState.value.threatZone)
+        transitionToBarricade()
+    }
+
+    fun quickBarricade() {
+        transitionToBarricade()
+    }
+
+    fun quickEvacuate(route: String = "SOUTH - EXIT 4") {
+        triggerEvacuate(route)
     }
 
     private fun handleMeshPayload(payload: String) {
         when {
-            payload.startsWith("ALERT:THREAT_DETECTED") -> transitionToBarricade()
+            payload.startsWith("ALERT:THREAT_DETECTED") -> transitionToIncidentFlow()
             payload.startsWith("ALERT:ALL_CLEAR") -> {
                 _uiState.value = _uiState.value.copy(appState = AppState.LISTENING)
             }
@@ -100,5 +151,16 @@ class EchoOrchestrator(
 
     private fun transitionToBarricade() {
         _uiState.value = _uiState.value.copy(appState = AppState.BARRICADE)
+    }
+
+    private fun transitionToIncidentFlow() {
+        _uiState.value = _uiState.value.copy(
+            appState = AppState.LOCATION_CONFIRMATION,
+            locationConfirmed = false,
+            safetyStatus = SafetyStatus.UNKNOWN,
+            companionsCount = 0,
+            injuredCount = 0,
+            incidentNotes = ""
+        )
     }
 }

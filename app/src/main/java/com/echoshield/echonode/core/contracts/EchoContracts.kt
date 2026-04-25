@@ -5,8 +5,17 @@ import kotlinx.coroutines.flow.StateFlow
 
 enum class AppState {
     LISTENING,
+    LOCATION_CONFIRMATION,
+    SAFETY_CHECK,
+    INCIDENT_REPORT,
     BARRICADE,
     EVACUATE
+}
+
+enum class SafetyStatus {
+    SAFE,
+    INJURED,
+    UNKNOWN
 }
 
 enum class MeshStatus {
@@ -37,7 +46,14 @@ data class EchoUiState(
     ),
     val meshStatus: MeshStatus = MeshStatus.IDLE,
     val evacuationRoute: String = "EXIT 4",
-    val threatZone: String = "NORTH HALL"
+    val threatZone: String = "NORTH HALL",
+    val locationLabel: String = "123 Elm Street, Zagreb, Croatia",
+    val locationTimestamp: String = "14:37 - October 22, 2025",
+    val locationConfirmed: Boolean = false,
+    val safetyStatus: SafetyStatus = SafetyStatus.UNKNOWN,
+    val companionsCount: Int = 0,
+    val injuredCount: Int = 0,
+    val incidentNotes: String = ""
 )
 
 interface SensorGateway {

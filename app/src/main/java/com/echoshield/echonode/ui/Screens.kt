@@ -22,19 +22,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,10 +49,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.echoshield.echonode.data.MeshNetworkManager
+import com.echoshield.echonode.core.contracts.SafetyStatus
 import com.echoshield.echonode.viewmodel.MainViewModel
 
 private val DarkBackground = Color(0xFF0A0A0A)
@@ -651,6 +654,421 @@ fun EvacuateScreen(
                         fontWeight = FontWeight.Bold
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun LocationConfirmationScreen(
+    locationLabel: String,
+    locationTimestamp: String,
+    onConfirm: (Boolean) -> Unit,
+    onQuickBarricade: () -> Unit,
+    onQuickEvacuate: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color(0xFFE9EDF5))
+            .padding(20.dp),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column {
+            FlowHeader(
+                title = "Location",
+                step = 1,
+                totalSteps = 3
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White)
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text(
+                        text = "Your Location",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF1A1A1A)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = locationLabel,
+                        fontSize = 16.sp,
+                        color = Color(0xFF1A1A1A)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = locationTimestamp,
+                        fontSize = 14.sp,
+                        color = Color(0xFF4E596B)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedButton(
+                    onClick = { onConfirm(false) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text("Location Not Exact", fontWeight = FontWeight.SemiBold)
+                }
+
+                Button(
+                    onClick = { onConfirm(true) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2F6BDE)),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text("Confirm", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        EmergencyQuickActions(
+            onQuickBarricade = onQuickBarricade,
+            onQuickEvacuate = onQuickEvacuate
+        )
+    }
+}
+
+@Composable
+fun SafetyCheckScreen(
+    selectedStatus: SafetyStatus,
+    onStatusSelected: (SafetyStatus) -> Unit,
+    onNext: () -> Unit,
+    onQuickBarricade: () -> Unit,
+    onQuickEvacuate: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color(0xFFE9EDF5))
+            .padding(20.dp),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column {
+            FlowHeader(
+                title = "Safety Check",
+                step = 2,
+                totalSteps = 3
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Text(
+                text = "Are you and everyone else safe?",
+                fontSize = 30.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF111111),
+                lineHeight = 36.sp
+            )
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            SafetyStatusButton(
+                label = "Yes, we're OK",
+                selected = selectedStatus == SafetyStatus.SAFE,
+                color = Color(0xFF0D9F46),
+                onClick = { onStatusSelected(SafetyStatus.SAFE) }
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            SafetyStatusButton(
+                label = "Someone is injured",
+                selected = selectedStatus == SafetyStatus.INJURED,
+                color = Color(0xFFC79200),
+                onClick = { onStatusSelected(SafetyStatus.INJURED) }
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            SafetyStatusButton(
+                label = "Not sure",
+                selected = selectedStatus == SafetyStatus.UNKNOWN,
+                color = Color(0xFF55637D),
+                onClick = { onStatusSelected(SafetyStatus.UNKNOWN) }
+            )
+
+            Spacer(modifier = Modifier.height(28.dp))
+
+            Button(
+                onClick = onNext,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(54.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2F6BDE)),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Text("Next", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            }
+        }
+
+        EmergencyQuickActions(
+            onQuickBarricade = onQuickBarricade,
+            onQuickEvacuate = onQuickEvacuate
+        )
+    }
+}
+
+@Composable
+fun IncidentReportScreen(
+    locationLabel: String,
+    locationTimestamp: String,
+    safetyStatus: SafetyStatus,
+    companionsCount: Int,
+    injuredCount: Int,
+    incidentNotes: String,
+    onCompanionsChange: (Int) -> Unit,
+    onInjuredChange: (Int) -> Unit,
+    onNotesChange: (String) -> Unit,
+    onSubmit: () -> Unit,
+    onQuickBarricade: () -> Unit,
+    onQuickEvacuate: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val scrollState = rememberScrollState()
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color(0xFFE9EDF5))
+            .padding(20.dp)
+            .verticalScroll(scrollState),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        FlowHeader(
+            title = "Incident Notes",
+            step = 3,
+            totalSteps = 3
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Location", fontWeight = FontWeight.Bold, color = Color(0xFF111111))
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(locationLabel, color = Color(0xFF2E3642))
+                Text(locationTimestamp, color = Color(0xFF5F697A), fontSize = 13.sp)
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "Safety: ${safetyStatus.name}",
+                    fontWeight = FontWeight.SemiBold,
+                    color = when (safetyStatus) {
+                        SafetyStatus.SAFE -> Color(0xFF0D9F46)
+                        SafetyStatus.INJURED -> Color(0xFFC79200)
+                        SafetyStatus.UNKNOWN -> Color(0xFF55637D)
+                    }
+                )
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "People Details",
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF111111),
+                    fontSize = 18.sp
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                CounterRow(
+                    label = "People with you",
+                    value = companionsCount,
+                    onChange = onCompanionsChange
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                CounterRow(
+                    label = "Injured",
+                    value = injuredCount,
+                    onChange = onInjuredChange
+                )
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Notes / Voice Note Transcript",
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF111111)
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = incidentNotes,
+                    onValueChange = onNotesChange,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(180.dp),
+                    placeholder = { Text("Type or speak what happened") }
+                )
+            }
+        }
+
+        Button(
+            onClick = onSubmit,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B4FB5)),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Text("Notify Incident & Continue", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
+
+        EmergencyQuickActions(
+            onQuickBarricade = onQuickBarricade,
+            onQuickEvacuate = onQuickEvacuate
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+    }
+}
+
+@Composable
+private fun FlowHeader(
+    title: String,
+    step: Int,
+    totalSteps: Int
+) {
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(title, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color(0xFF111111))
+            Text("$step/$totalSteps", color = Color(0xFF55637D), fontWeight = FontWeight.SemiBold)
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+        LinearProgressIndicator(
+            progress = step / totalSteps.toFloat(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(8.dp)
+                .clip(RoundedCornerShape(8.dp)),
+            color = Color(0xFF2F6BDE),
+            trackColor = Color(0xFFD5DAE4)
+        )
+    }
+}
+
+@Composable
+private fun SafetyStatusButton(
+    label: String,
+    selected: Boolean,
+    color: Color,
+    onClick: () -> Unit
+) {
+    Button(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(56.dp),
+        shape = RoundedCornerShape(14.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (selected) color else Color.White,
+            contentColor = if (selected) Color.White else Color(0xFF1A1A1A)
+        )
+    ) {
+        Text(label, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+    }
+}
+
+@Composable
+private fun EmergencyQuickActions(
+    onQuickBarricade: () -> Unit,
+    onQuickEvacuate: () -> Unit
+) {
+    Column {
+        Text(
+            text = "Emergency Actions",
+            color = Color(0xFF2E3642),
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Button(
+                onClick = onQuickBarricade,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(52.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = AlertRed),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Text("Immediate Barricade", fontWeight = FontWeight.Bold)
+            }
+
+            OutlinedButton(
+                onClick = onQuickEvacuate,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(52.dp),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Text("Immediate Evacuate", fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun CounterRow(
+    label: String,
+    value: Int,
+    onChange: (Int) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, fontSize = 16.sp, color = Color(0xFF1A1A1A), fontWeight = FontWeight.SemiBold)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(onClick = { onChange((value - 1).coerceAtLeast(0)) }) {
+                Text("-")
+            }
+            OutlinedTextField(
+                value = value.toString(),
+                onValueChange = { raw ->
+                    val parsed = raw.toIntOrNull() ?: 0
+                    onChange(parsed.coerceAtLeast(0))
+                },
+                singleLine = true,
+                modifier = Modifier.width(88.dp),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+            )
+            OutlinedButton(onClick = { onChange(value + 1) }) {
+                Text("+")
             }
         }
     }
