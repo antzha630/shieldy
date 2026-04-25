@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.echoshield.echonode.core.contracts.AppState
 import com.echoshield.echonode.service.AudioSensorService
 import com.echoshield.echonode.ui.BarricadeScreen
 import com.echoshield.echonode.ui.DashboardScreen
@@ -121,7 +122,7 @@ fun EchoShieldRoot() {
                     modifier = Modifier.fillMaxSize()
                 )
             }
-            MainViewModel.AppState.LISTENING.name -> {
+            AppState.LISTENING.name -> {
                 DashboardScreen(
                     uiState = uiState,
                     onSimulateGunshot = { viewModel.triggerManualDebugAlert() },
@@ -130,7 +131,7 @@ fun EchoShieldRoot() {
                     modifier = Modifier.fillMaxSize()
                 )
             }
-            MainViewModel.AppState.BARRICADE.name -> {
+            AppState.BARRICADE.name -> {
                 BarricadeScreen(
                     threatZone = uiState.threatZone,
                     onToggle = { viewModel.toggleBarricadeEvacuate() },
@@ -138,7 +139,7 @@ fun EchoShieldRoot() {
                     modifier = Modifier.fillMaxSize()
                 )
             }
-            MainViewModel.AppState.EVACUATE.name -> {
+            AppState.EVACUATE.name -> {
                 EvacuateScreen(
                     evacuationRoute = uiState.evacuationRoute,
                     onToggle = { viewModel.toggleBarricadeEvacuate() },

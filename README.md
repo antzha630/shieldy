@@ -9,6 +9,7 @@ EchoNode is an Android hackathon MVP for school threat response. It runs a foreg
 - **Mesh:** Nearby Connections `P2P_CLUSTER`
 - **State UI:** `LISTENING`, `BARRICADE`, `EVACUATE`
 - **Goal:** sub-second local trigger + rapid peer propagation
+- **Team split:** see `WORKSTREAMS.md` for 3-way ownership map
 
 ## AI Handoff (For Other Agents)
 
