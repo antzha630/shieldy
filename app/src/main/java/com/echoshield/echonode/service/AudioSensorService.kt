@@ -37,16 +37,51 @@ class AudioSensorService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "echoshield_sensor_channel"
 
+        // ─────────────────────────────────────────────────────────────────────
+        // AUDIO CAPTURE SETTINGS
+        // ─────────────────────────────────────────────────────────────────────
         private const val SAMPLE_RATE = 44100
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
 
+        // ─────────────────────────────────────────────────────────────────────
+        // TWO-TIER DETECTOR TUNING CONSTANTS
+        // ─────────────────────────────────────────────────────────────────────
+        
+        // TIER 1: Low-power activity gate
+        // EMA alpha: higher = more responsive to spikes, lower = more stable.
+        // 0.15 balances spike detection vs ambient noise filtering.
+        private const val EMA_ALPHA = 0.15
+        
+        // Gate threshold is read from SystemEventFlow.detectionThreshold (default 450).
+        // Tune higher to reduce false gate opens from speech/ambient noise.
+        // Typical quiet room ~50-100 RMS, speech ~200-500, clap/loud ~800+.
+
+        // TIER 2: ML confirmation
+        // Gunshot confidence threshold. YAMNet typically outputs 0.0-1.0 for each class.
+        // 0.25 is conservative; increase to 0.35-0.5 if too many false positives.
+        private const val GUNSHOT_CONFIDENCE_THRESHOLD = 0.25f
+        
+        // Minimum consecutive high-confidence frames before trigger.
+        // Prevents single-frame noise spikes from triggering.
+        private const val MIN_CONSECUTIVE_DETECTIONS = 1
+        
+        // ML inference rate limit. Running inference too often drains battery.
+        // 400ms provides ~2.5 inferences/sec when gate is open.
+        private const val MODEL_INFERENCE_INTERVAL_MS = 400L
+
+        // COOLDOWN: Prevent rapid re-triggers after a detection.
+        // 5 seconds allows situation assessment before next alert.
         private const val TRIGGER_COOLDOWN_MS = 5000L
+        
+        // Telemetry update rate for UI. 100ms = 10 updates/sec.
         private const val AMPLITUDE_UPDATE_INTERVAL_MS = 100L
-        private const val GUNSHOT_CONFIDENCE_THRESHOLD = 0.2f
+
+        // ─────────────────────────────────────────────────────────────────────
+        // MODEL SETTINGS (YAMNet expects 16kHz input, ~0.975s window)
+        // ─────────────────────────────────────────────────────────────────────
         private const val MODEL_SAMPLE_RATE = 16000
         private const val MODEL_INPUT_SAMPLES = 15600
-        private const val MODEL_INFERENCE_INTERVAL_MS = 400L
 
         fun startService(context: Context) {
             val intent = Intent(context, AudioSensorService::class.java)
@@ -70,7 +105,11 @@ class AudioSensorService : Service() {
     private lateinit var meshNetworkManager: MeshNetworkManager
     private lateinit var gunshotClassifier: GunshotClassifier
     
+    // Two-tier detector state
     private var lastTriggerTime = 0L
+    private var smoothedAmplitude = 0.0
+    private var consecutiveHighConfidence = 0
+    private var currentGateOpen = false
 
     override fun onCreate() {
         super.onCreate()
@@ -234,8 +273,11 @@ class AudioSensorService : Service() {
             val readResult = audioRecord?.read(buffer, 0, buffer.size) ?: -1
 
             if (readResult > 0) {
-                val rms = calculateRMS(buffer, readResult)
-                val amplitude = rms
+                val instantRms = calculateRMS(buffer, readResult)
+                
+                // TIER 1: Apply EMA smoothing for stable gate decisions
+                smoothedAmplitude = EMA_ALPHA * instantRms + (1 - EMA_ALPHA) * smoothedAmplitude
+                
                 appendToRollingBuffer(
                     source = buffer,
                     size = readResult,
@@ -249,33 +291,64 @@ class AudioSensorService : Service() {
                 }
 
                 val currentTime = System.currentTimeMillis()
+                val cooldownRemaining = maxOf(0L, TRIGGER_COOLDOWN_MS - (currentTime - lastTriggerTime))
+                
+                // Update telemetry at fixed interval
                 if (currentTime - lastAmplitudeUpdate >= AMPLITUDE_UPDATE_INTERVAL_MS) {
-                    SystemEventFlow.updateAmplitude(amplitude)
+                    SystemEventFlow.updateAmplitude(instantRms)
+                    SystemEventFlow.updateSmoothedAmplitude(smoothedAmplitude)
+                    SystemEventFlow.updateCooldownRemaining(cooldownRemaining)
                     lastAmplitudeUpdate = currentTime
                 }
 
-                val activityGate = SystemEventFlow.detectionThreshold.value
-                val shouldRunModel = amplitude >= activityGate &&
-                    rollingBufferFilled &&
+                // TIER 1: Activity gate check (uses smoothed amplitude for stability)
+                val gateThreshold = SystemEventFlow.detectionThreshold.value
+                val gateOpen = smoothedAmplitude >= gateThreshold && rollingBufferFilled
+                
+                // Update gate state telemetry if changed
+                if (gateOpen != currentGateOpen) {
+                    currentGateOpen = gateOpen
+                    SystemEventFlow.updateGateOpen(gateOpen)
+                    if (gateOpen) {
+                        Log.d(TAG, "Activity gate OPENED (smoothed=${String.format("%.1f", smoothedAmplitude)} >= $gateThreshold)")
+                    } else {
+                        Log.d(TAG, "Activity gate CLOSED")
+                        consecutiveHighConfidence = 0
+                    }
+                }
+
+                // TIER 2: ML inference only when gate is open and rate limit allows
+                val shouldRunModel = gateOpen &&
                     (currentTime - lastModelInference >= MODEL_INFERENCE_INTERVAL_MS)
 
                 if (shouldRunModel) {
                     lastModelInference = currentTime
                     val modelInput = snapshotModelInput(rollingModelSamples, rollingWriteIndex)
                     val result = gunshotClassifier.classify(modelInput)
+                    
                     if (result != null) {
                         SystemEventFlow.updateModelInference(
                             gunshotConfidence = result.gunshotConfidence,
                             topLabel = result.topLabel
                         )
-                    }
-                    if (result != null && result.gunshotConfidence >= GUNSHOT_CONFIDENCE_THRESHOLD) {
-                        if (currentTime - lastTriggerTime >= TRIGGER_COOLDOWN_MS) {
+
+                        // Track consecutive high-confidence frames
+                        if (result.gunshotConfidence >= GUNSHOT_CONFIDENCE_THRESHOLD) {
+                            consecutiveHighConfidence++
+                        } else {
+                            consecutiveHighConfidence = 0
+                        }
+
+                        // Trigger only if consecutive threshold met AND cooldown expired
+                        if (consecutiveHighConfidence >= MIN_CONSECUTIVE_DETECTIONS &&
+                            cooldownRemaining == 0L) {
                             Log.w(
                                 TAG,
-                                "ML THREAT DETECTED! gunshot=${result.gunshotConfidence} top=${result.topLabel} score=${result.topScore}"
+                                "ML THREAT DETECTED! gunshot=${result.gunshotConfidence} " +
+                                "consecutive=$consecutiveHighConfidence top=${result.topLabel}"
                             )
                             lastTriggerTime = currentTime
+                            consecutiveHighConfidence = 0
                             SystemEventFlow.emitLocalTrigger()
                         }
                     }
@@ -356,7 +429,15 @@ class AudioSensorService : Service() {
         }
         audioRecord = null
         
+        // Reset all two-tier detector state and telemetry
+        smoothedAmplitude = 0.0
+        consecutiveHighConfidence = 0
+        currentGateOpen = false
+        
         SystemEventFlow.updateAmplitude(0.0)
+        SystemEventFlow.updateSmoothedAmplitude(0.0)
+        SystemEventFlow.updateGateOpen(false)
+        SystemEventFlow.updateCooldownRemaining(0L)
         SystemEventFlow.updateModelInference(0f, "idle")
         Log.d(TAG, "Audio recording stopped")
     }

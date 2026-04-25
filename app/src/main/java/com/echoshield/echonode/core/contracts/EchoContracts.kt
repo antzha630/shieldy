@@ -28,9 +28,12 @@ enum class MeshStatus {
 
 data class DetectionTelemetry(
     val amplitude: Double,
+    val smoothedAmplitude: Double,
     val threshold: Double,
+    val gateOpen: Boolean,
     val modelGunshotConfidence: Float,
     val modelTopLabel: String,
+    val cooldownRemainingMs: Long,
     val serviceRunning: Boolean
 )
 
@@ -39,9 +42,12 @@ data class EchoUiState(
     val connectedPeers: Int = 0,
     val detectionTelemetry: DetectionTelemetry = DetectionTelemetry(
         amplitude = 0.0,
+        smoothedAmplitude = 0.0,
         threshold = 450.0,
+        gateOpen = false,
         modelGunshotConfidence = 0f,
         modelTopLabel = "unknown",
+        cooldownRemainingMs = 0L,
         serviceRunning = false
     ),
     val meshStatus: MeshStatus = MeshStatus.IDLE,

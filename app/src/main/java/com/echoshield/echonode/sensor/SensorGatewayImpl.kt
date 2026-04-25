@@ -23,9 +23,12 @@ class SensorGatewayImpl : SensorGateway {
     private val _telemetry = MutableStateFlow(
         DetectionTelemetry(
             amplitude = 0.0,
+            smoothedAmplitude = 0.0,
             threshold = 450.0,
+            gateOpen = false,
             modelGunshotConfidence = 0f,
             modelTopLabel = "unknown",
+            cooldownRemainingMs = 0L,
             serviceRunning = false
         )
     )
@@ -45,8 +48,18 @@ class SensorGatewayImpl : SensorGateway {
             }
         }
         scope.launch {
+            SystemEventFlow.smoothedAmplitude.collect { smoothed ->
+                _telemetry.value = _telemetry.value.copy(smoothedAmplitude = smoothed)
+            }
+        }
+        scope.launch {
             SystemEventFlow.detectionThreshold.collect { threshold ->
                 _telemetry.value = _telemetry.value.copy(threshold = threshold)
+            }
+        }
+        scope.launch {
+            SystemEventFlow.gateOpen.collect { open ->
+                _telemetry.value = _telemetry.value.copy(gateOpen = open)
             }
         }
         scope.launch {
@@ -57,6 +70,11 @@ class SensorGatewayImpl : SensorGateway {
         scope.launch {
             SystemEventFlow.modelTopLabel.collect { label ->
                 _telemetry.value = _telemetry.value.copy(modelTopLabel = label)
+            }
+        }
+        scope.launch {
+            SystemEventFlow.cooldownRemainingMs.collect { remaining ->
+                _telemetry.value = _telemetry.value.copy(cooldownRemainingMs = remaining)
             }
         }
         scope.launch {

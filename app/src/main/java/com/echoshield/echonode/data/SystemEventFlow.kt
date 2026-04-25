@@ -23,6 +23,15 @@ object SystemEventFlow {
     private val _audioAmplitude = MutableStateFlow(0.0)
     val audioAmplitude: StateFlow<Double> = _audioAmplitude.asStateFlow()
 
+    private val _smoothedAmplitude = MutableStateFlow(0.0)
+    val smoothedAmplitude: StateFlow<Double> = _smoothedAmplitude.asStateFlow()
+
+    private val _gateOpen = MutableStateFlow(false)
+    val gateOpen: StateFlow<Boolean> = _gateOpen.asStateFlow()
+
+    private val _cooldownRemainingMs = MutableStateFlow(0L)
+    val cooldownRemainingMs: StateFlow<Long> = _cooldownRemainingMs.asStateFlow()
+
     private val _isServiceRunning = MutableStateFlow(false)
     val isServiceRunning: StateFlow<Boolean> = _isServiceRunning.asStateFlow()
 
@@ -70,6 +79,18 @@ object SystemEventFlow {
     fun updateModelInference(gunshotConfidence: Float, topLabel: String) {
         _modelGunshotConfidence.value = gunshotConfidence
         _modelTopLabel.value = topLabel
+    }
+
+    fun updateSmoothedAmplitude(amplitude: Double) {
+        _smoothedAmplitude.value = amplitude
+    }
+
+    fun updateGateOpen(open: Boolean) {
+        _gateOpen.value = open
+    }
+
+    fun updateCooldownRemaining(remainingMs: Long) {
+        _cooldownRemainingMs.value = remainingMs
     }
 
     data class SystemEvent(
