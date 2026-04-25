@@ -18,7 +18,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val container = AppContainer(application.applicationContext)
     private val orchestrator = EchoOrchestrator(
         sensorGateway = container.sensorGateway,
-        meshGateway = container.meshGateway
+        meshGateway = container.meshGateway,
+        locationProvider = container.locationProvider
     )
 
     data class UiState(

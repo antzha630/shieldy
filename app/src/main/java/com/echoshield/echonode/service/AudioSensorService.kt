@@ -50,8 +50,9 @@ class AudioSensorService : Service() {
         
         // TIER 1: Low-power activity gate
         // EMA alpha: higher = more responsive to spikes, lower = more stable.
-        // 0.15 balances spike detection vs ambient noise filtering.
-        private const val EMA_ALPHA = 0.15
+        // 0.4 is responsive enough for impulsive sounds like gunshots while
+        // still filtering out brief noise. Original was 0.15 which over-dampened spikes.
+        private const val EMA_ALPHA = 0.4
         
         // Gate threshold is read from SystemEventFlow.detectionThreshold (default 450).
         // Tune higher to reduce false gate opens from speech/ambient noise.
@@ -59,8 +60,9 @@ class AudioSensorService : Service() {
 
         // TIER 2: ML confirmation
         // Gunshot confidence threshold. YAMNet typically outputs 0.0-1.0 for each class.
-        // 0.25 is conservative; increase to 0.35-0.5 if too many false positives.
-        private const val GUNSHOT_CONFIDENCE_THRESHOLD = 0.25f
+        // 0.15 is sensitive for real gunshot detection; was 0.2 originally, worked well.
+        // Increase to 0.25-0.35 if getting false positives from other loud sounds.
+        private const val GUNSHOT_CONFIDENCE_THRESHOLD = 0.15f
         
         // Minimum consecutive high-confidence frames before trigger.
         // Prevents single-frame noise spikes from triggering.
@@ -301,16 +303,18 @@ class AudioSensorService : Service() {
                     lastAmplitudeUpdate = currentTime
                 }
 
-                // TIER 1: Activity gate check (uses smoothed amplitude for stability)
+                // TIER 1: Activity gate check
+                // Use RAW amplitude for gate (not smoothed) - gunshots are impulsive spikes
+                // that get dampened by EMA. Gate opens on ANY loud sound, ML filters false positives.
                 val gateThreshold = SystemEventFlow.detectionThreshold.value
-                val gateOpen = smoothedAmplitude >= gateThreshold && rollingBufferFilled
+                val gateOpen = instantRms >= gateThreshold && rollingBufferFilled
                 
                 // Update gate state telemetry if changed
                 if (gateOpen != currentGateOpen) {
                     currentGateOpen = gateOpen
                     SystemEventFlow.updateGateOpen(gateOpen)
                     if (gateOpen) {
-                        Log.d(TAG, "Activity gate OPENED (smoothed=${String.format("%.1f", smoothedAmplitude)} >= $gateThreshold)")
+                        Log.d(TAG, "Activity gate OPENED (rms=${String.format("%.1f", instantRms)} >= $gateThreshold)")
                     } else {
                         Log.d(TAG, "Activity gate CLOSED")
                         consecutiveHighConfidence = 0

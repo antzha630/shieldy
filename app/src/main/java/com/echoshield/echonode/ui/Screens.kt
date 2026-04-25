@@ -698,6 +698,8 @@ fun LocationConfirmationScreen(
     onQuickEvacuate: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var selectedYes by remember { mutableStateOf(true) }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -720,53 +722,99 @@ fun LocationConfirmationScreen(
                 colors = CardDefaults.cardColors(containerColor = Color.White)
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
-                    Text(
-                        text = "Your Location",
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF1A1A1A)
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "📍",
+                            fontSize = 18.sp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Your Location",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF2F6BDE)
+                        )
+                    }
                     Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = locationLabel,
-                        fontSize = 16.sp,
-                        color = Color(0xFF1A1A1A)
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = locationTimestamp,
-                        fontSize = 14.sp,
-                        color = Color(0xFF4E596B)
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(text = "📍", fontSize = 14.sp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = locationLabel,
+                            fontSize = 16.sp,
+                            color = Color(0xFF1A1A1A)
+                        )
+                    }
+                    if (locationTimestamp.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(text = "🕐", fontSize = 14.sp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = locationTimestamp,
+                                fontSize = 14.sp,
+                                color = Color(0xFF4E596B)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (selectedYes) Color(0xFFE8F5E9) else Color.Transparent)
+                                .padding(8.dp)
+                        ) {
+                            Text(
+                                text = if (selectedYes) "✅" else "⬜",
+                                fontSize = 20.sp,
+                                modifier = Modifier.padding(end = 4.dp)
+                            )
+                            Text(
+                                text = "Yes",
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (selectedYes) Color(0xFF2E7D32) else Color(0xFF666666)
+                            )
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (!selectedYes) Color(0xFFFFEBEE) else Color.Transparent)
+                                .padding(8.dp)
+                        ) {
+                            Text(
+                                text = if (!selectedYes) "❌" else "⬜",
+                                fontSize = 20.sp,
+                                modifier = Modifier.padding(end = 4.dp)
+                            )
+                            Text(
+                                text = "No",
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (!selectedYes) Color(0xFFC62828) else Color(0xFF666666)
+                            )
+                        }
+                    }
                 }
             }
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            Button(
+                onClick = { onConfirm(selectedYes) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2F6BDE)),
+                shape = RoundedCornerShape(14.dp)
             ) {
-                OutlinedButton(
-                    onClick = { onConfirm(false) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(52.dp),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Text("Location Not Exact", fontWeight = FontWeight.SemiBold)
-                }
-
-                Button(
-                    onClick = { onConfirm(true) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(52.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2F6BDE)),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Text("Confirm", fontWeight = FontWeight.Bold)
-                }
+                Text("Confirm Location", fontWeight = FontWeight.Bold, fontSize = 16.sp)
             }
         }
 
@@ -800,20 +848,23 @@ fun SafetyCheckScreen(
                 totalSteps = 3
             )
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(32.dp))
 
             Text(
                 text = "Are you and everyone else safe?",
-                fontSize = 30.sp,
+                fontSize = 26.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color(0xFF111111),
-                lineHeight = 36.sp
+                lineHeight = 32.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
             )
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(28.dp))
 
             SafetyStatusButton(
                 label = "Yes, we're OK",
+                emoji = "✅",
                 selected = selectedStatus == SafetyStatus.SAFE,
                 color = Color(0xFF0D9F46),
                 onClick = { onStatusSelected(SafetyStatus.SAFE) }
@@ -821,6 +872,7 @@ fun SafetyCheckScreen(
             Spacer(modifier = Modifier.height(12.dp))
             SafetyStatusButton(
                 label = "Someone is injured",
+                emoji = "⚠️",
                 selected = selectedStatus == SafetyStatus.INJURED,
                 color = Color(0xFFC79200),
                 onClick = { onStatusSelected(SafetyStatus.INJURED) }
@@ -828,6 +880,7 @@ fun SafetyCheckScreen(
             Spacer(modifier = Modifier.height(12.dp))
             SafetyStatusButton(
                 label = "Not sure",
+                emoji = "🤔",
                 selected = selectedStatus == SafetyStatus.UNKNOWN,
                 color = Color(0xFF55637D),
                 onClick = { onStatusSelected(SafetyStatus.UNKNOWN) }
@@ -843,7 +896,14 @@ fun SafetyCheckScreen(
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2F6BDE)),
                 shape = RoundedCornerShape(14.dp)
             ) {
-                Text("Next", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Text("Next", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("→", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                }
             }
         }
 
@@ -1009,6 +1069,7 @@ private fun FlowHeader(
 @Composable
 private fun SafetyStatusButton(
     label: String,
+    emoji: String,
     selected: Boolean,
     color: Color,
     onClick: () -> Unit
@@ -1017,14 +1078,21 @@ private fun SafetyStatusButton(
         onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .height(56.dp),
+            .height(60.dp),
         shape = RoundedCornerShape(14.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = if (selected) color else Color.White,
             contentColor = if (selected) Color.White else Color(0xFF1A1A1A)
         )
     ) {
-        Text(label, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Text(text = emoji, fontSize = 24.sp)
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(label, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+        }
     }
 }
 

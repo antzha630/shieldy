@@ -78,6 +78,9 @@ dependencies {
 
     // Google Play Services - Nearby Connections (CRITICAL for P2P Mesh)
     implementation("com.google.android.gms:play-services-nearby:19.0.0")
+    
+    // Google Play Services - Location (for GPS)
+    implementation("com.google.android.gms:play-services-location:21.1.0")
 
     // Cloud relay scaffolding
     implementation("com.squareup.retrofit2:retrofit:2.11.0")

@@ -5,6 +5,7 @@ import com.echoshield.echonode.core.contracts.EchoUiState
 import com.echoshield.echonode.core.contracts.MeshGateway
 import com.echoshield.echonode.core.contracts.SafetyStatus
 import com.echoshield.echonode.core.contracts.SensorGateway
+import com.echoshield.echonode.sensor.LocationProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -13,7 +14,8 @@ import kotlinx.coroutines.launch
 
 class EchoOrchestrator(
     private val sensorGateway: SensorGateway,
-    private val meshGateway: MeshGateway
+    private val meshGateway: MeshGateway,
+    private val locationProvider: LocationProvider? = null
 ) {
     private val _uiState = MutableStateFlow(EchoUiState())
     val uiState: StateFlow<EchoUiState> = _uiState.asStateFlow()
@@ -47,6 +49,18 @@ class EchoOrchestrator(
         scope.launch {
             meshGateway.incomingAlerts.collect { payload ->
                 handleMeshPayload(payload)
+            }
+        }
+
+        locationProvider?.let { provider ->
+            provider.startLocationUpdates()
+            scope.launch {
+                provider.currentLocation.collect { location ->
+                    _uiState.value = _uiState.value.copy(
+                        locationLabel = location.label,
+                        locationTimestamp = location.timestamp
+                    )
+                }
             }
         }
     }
