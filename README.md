@@ -1,6 +1,46 @@
 # EchoShield (EchoNode) - Android MVP
 
-A distributed threat detection and response system for school safety. This MVP demonstrates a peer-to-peer mesh network using Google Nearby Connections for coordinated emergency response.
+EchoNode is an Android hackathon MVP for school threat response. It runs a foreground audio sensor, performs on-device gunshot-like audio inference, and propagates alerts across nearby Android devices using Google Nearby Connections.
+
+## TL;DR
+
+- **Platform:** Android-only MVP
+- **Detection:** On-device YAMNet (`yamnet.tflite`) + activity gate
+- **Mesh:** Nearby Connections `P2P_CLUSTER`
+- **State UI:** `LISTENING`, `BARRICADE`, `EVACUATE`
+- **Goal:** sub-second local trigger + rapid peer propagation
+
+## AI Handoff (For Other Agents)
+
+If you are an AI agent picking up this repository:
+
+- Start with `MainActivity.kt`, `MainViewModel.kt`, `AudioSensorService.kt`, `MeshNetworkManager.kt`.
+- Detection logic runs in `AudioSensorService` and publishes via `SystemEventFlow`.
+- Mesh propagation and dedupe IDs are in `MeshNetworkManager`.
+- UI consumes `MainViewModel.UiState` in `Screens.kt`.
+- Model assets are in `app/src/main/assets/`:
+  - `yamnet.tflite`
+  - `yamnet_class_map.csv`
+
+### Current Detection Pipeline
+
+1. `AudioRecord` captures PCM 16-bit mono at 44.1kHz.
+2. Audio is downsampled to 16k and stored in a rolling 15600-sample buffer.
+3. YAMNet inference runs periodically (gated by amplitude/activity).
+4. If gunshot confidence crosses threshold, service emits `LOCAL_TRIGGER`.
+5. ViewModel transitions to `BARRICADE` and broadcasts to mesh peers.
+
+### Current Mesh Payload Format
+
+- Threat: `ALERT:THREAT_DETECTED|<messageId>|<zone>`
+- Evacuate: `ALERT:EVACUATE|<messageId>|<route>`
+- Clear: `ALERT:ALL_CLEAR|<messageId>`
+
+### Known Constraints
+
+- Nearby on emulator is unreliable. Use **real Android devices** for mesh demos.
+- Detection is pretrained YAMNet class score gating, not yet custom fine-tuned school-specific classifier.
+- iOS parity requires backend relay architecture due to iOS background constraints.
 
 ## Architecture
 
@@ -9,53 +49,60 @@ A distributed threat detection and response system for school safety. This MVP d
 │                        EchoNode App                         │
 ├─────────────────────────────────────────────────────────────┤
 │  MainActivity                                                │
-│  ├── Permission Handling (Audio, Location, Bluetooth)       │
-│  └── Compose UI Navigation                                   │
+│  ├── Runtime permissions                                     │
+│  └── Compose root + screen routing                           │
 ├─────────────────────────────────────────────────────────────┤
 │  MainViewModel                                               │
-│  ├── AppState (LISTENING | BARRICADE | EVACUATE)            │
-│  ├── SystemEventFlow Observer                                │
-│  └── MeshNetworkManager Observer                             │
+│  ├── UiState + app transitions                               │
+│  ├── Observes SystemEventFlow                                │
+│  └── Observes MeshNetworkManager                             │
 ├─────────────────────────────────────────────────────────────┤
 │  AudioSensorService (Foreground)                             │
-│  ├── AudioRecord (44.1kHz, Mono, 16-bit)                    │
-│  ├── RMS Amplitude Calculation                               │
-│  └── Threshold Detection → SystemEventFlow                   │
+│  ├── AudioRecord capture                                     │
+│  ├── YAMNet inference via GunshotClassifier                  │
+│  └── Emits LOCAL_TRIGGER                                     │
 ├─────────────────────────────────────────────────────────────┤
 │  MeshNetworkManager                                          │
-│  ├── Nearby Connections (P2P_CLUSTER Strategy)              │
-│  ├── Auto-discovery & Connection                             │
-│  └── Alert Broadcasting (THREAT_DETECTED, EVACUATE, CLEAR)  │
+│  ├── Nearby P2P_CLUSTER advertise/discover                   │
+│  ├── Broadcast + receive payloads                            │
+│  └── Relay with message-id dedupe                            │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## Features
 
-### Sensor Mesh
-- Real-time audio monitoring via foreground service
-- RMS-based amplitude detection with configurable threshold
-- Automatic peer discovery and connection via Nearby Connections
+### Detection
+- Foreground microphone service for continuous monitoring
+- Activity-gated ML inference for battery-aware operation
+- Real-time debug telemetry in UI:
+  - Audio amplitude
+  - ML top label
+  - Gunshot confidence score
 
-### Alert States
-1. **LISTENING** - Normal monitoring state with pulsing green indicator
-2. **BARRICADE** - Red screen with lockdown instructions (threat in zone)
-3. **EVACUATE** - Green screen with escape route (safe to evacuate)
+### Alerting
+1. **LISTENING**: dark screen + active mesh indicator
+2. **BARRICADE**: high-contrast red emergency instruction view
+3. **EVACUATE**: high-contrast green route guidance view
 
-### P2P Communication
-- Uses Google Nearby Connections API (P2P_CLUSTER strategy)
-- Automatic mesh formation with nearby devices
-- Broadcast alerts propagate to all connected peers
+### Peer Mesh
+- Nearby Connections with automatic peer discovery
+- Alert rebroadcast to simulate viral propagation
+- Message ID cache to prevent infinite relay loops
 
-## Building
+## Build and Run
 
 ```bash
-# Clone and navigate to project
 cd shieldy
-
-# Build debug APK
 ./gradlew assembleDebug
+```
 
-# Install on connected device
+APK output:
+
+`app/build/outputs/apk/debug/app-debug.apk`
+
+Install from terminal (optional):
+
+```bash
 ./gradlew installDebug
 ```
 
@@ -63,51 +110,61 @@ cd shieldy
 
 | Permission | Purpose |
 |------------|---------|
-| `RECORD_AUDIO` | Threat audio detection |
-| `ACCESS_FINE_LOCATION` | Nearby device discovery |
-| `BLUETOOTH_*` | P2P mesh network |
-| `FOREGROUND_SERVICE_MICROPHONE` | Background monitoring |
-| `POST_NOTIFICATIONS` | Service notification |
+| `RECORD_AUDIO` | local audio detection |
+| `ACCESS_FINE_LOCATION` / `ACCESS_COARSE_LOCATION` | Nearby discovery requirement |
+| `BLUETOOTH_*` | P2P mesh links |
+| `FOREGROUND_SERVICE_MICROPHONE` | persistent background monitoring |
+| `POST_NOTIFICATIONS` | foreground service notification |
 
-## Testing the MVP
+## Test Plan (Recommended)
 
-1. Install on 2+ Android devices
-2. Grant all permissions when prompted
-3. Devices will auto-discover and connect
-4. Use "SIMULATE THREAT" button to trigger alert
-5. Alert will propagate to all connected peers
-6. Toggle between BARRICADE/EVACUATE modes
-7. Use "ALL CLEAR" to reset
+### Baseline Mesh Test
+1. Install `app-debug.apk` on 2 real Android devices.
+2. Grant all permissions.
+3. Keep both apps open for 10-20 seconds.
+4. Tap `SIMULATE THREAT` on one device.
+5. Verify both devices switch to `BARRICADE`.
+
+### ML Trigger Test
+1. On dashboard, open `OPTIONS`.
+2. Tune activity threshold slider for environment.
+3. Produce sharp impulse near microphone.
+4. Watch ML line (`top label` + confidence) and verify trigger behavior.
 
 ## Project Structure
 
 ```
 app/src/main/java/com/echoshield/echonode/
-├── MainActivity.kt              # Entry point, permission handling
-├── EchoShieldApp.kt             # Application class
+├── MainActivity.kt                # permissions + Compose entry
+├── EchoShieldApp.kt               # Application
 ├── data/
-│   ├── MeshNetworkManager.kt    # Nearby Connections P2P mesh
-│   └── SystemEventFlow.kt       # Cross-component event bus
+│   ├── MeshNetworkManager.kt      # Nearby mesh + relay dedupe
+│   └── SystemEventFlow.kt         # Shared event/state flows
 ├── service/
-│   └── AudioSensorService.kt    # Foreground audio monitoring
+│   ├── AudioSensorService.kt      # Foreground audio + detection loop
+│   └── GunshotClassifier.kt       # YAMNet TFLite wrapper
 ├── viewmodel/
-│   └── MainViewModel.kt         # UI state management
+│   └── MainViewModel.kt           # App state transitions
 └── ui/
-    ├── Screens.kt               # Compose UI screens
-    └── theme/
-        └── Theme.kt             # Material 3 dark theme
+    ├── Screens.kt                 # LISTENING/BARRICADE/EVACUATE screens
+    └── theme/Theme.kt             # Material 3 styling
 ```
 
-## Hackathon Notes
+Assets:
 
-This MVP swaps the production TFLite audio classification model for a simple amplitude threshold detector. The mesh consensus is simulated via Nearby Connections broadcast.
+```
+app/src/main/assets/
+├── yamnet.tflite
+└── yamnet_class_map.csv
+```
 
-For production:
-- Replace amplitude threshold with TFLite gunshot/scream classifier
-- Add location-based zone routing for "Silent Escort"
-- Implement secure alert verification protocol
-- Add admin dashboard for school security
+## Roadmap
+
+- Replace YAMNet direct class gating with fine-tuned gunshot head trained on domain data.
+- Add backend consensus and push relay (for reliable Android+iOS mixed fleets).
+- Add zone mapping and Silent Escort routing by room/hallway.
+- Add incident logs and admin console.
 
 ## License
 
-Hackathon Project - For demonstration purposes only.
+Hackathon project. Demo use only.
