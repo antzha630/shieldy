@@ -229,11 +229,30 @@ fun DashboardScreen(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    Text(
-                        text = "ML: ${uiState.modelTopLabel} (${String.format("%.2f", uiState.modelGunshotConfidence)})",
-                        fontSize = 10.sp,
-                        color = if (uiState.modelGunshotConfidence >= 0.2f) AlertRed else TextGray
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "ML: ${uiState.modelTopLabel} (${String.format("%.2f", uiState.modelGunshotConfidence)})",
+                            fontSize = 10.sp,
+                            color = if (uiState.modelGunshotConfidence >= 0.2f) AlertRed else TextGray
+                        )
+                        Text(
+                            text = if (uiState.gateOpen) "GATE: OPEN" else "GATE: CLOSED",
+                            fontSize = 10.sp,
+                            color = if (uiState.gateOpen) SensorGreen else TextGray
+                        )
+                    }
+
+                    if (uiState.cooldownRemainingMs > 0) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Cooldown: ${uiState.cooldownRemainingMs / 1000}s",
+                            fontSize = 10.sp,
+                            color = AlertRed.copy(alpha = 0.8f)
+                        )
+                    }
                 }
             }
         }
@@ -435,6 +454,17 @@ fun BarricadeScreen(
                         color = Color.White,
                         letterSpacing = 2.sp
                     )
+
+                    if (threatZone.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "ZONE: $threatZone",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White.copy(alpha = 0.9f),
+                            letterSpacing = 1.sp
+                        )
+                    }
 
                     Spacer(modifier = Modifier.height(12.dp))
 
