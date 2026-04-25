@@ -51,9 +51,9 @@ data class EchoUiState(
         serviceRunning = false
     ),
     val meshStatus: MeshStatus = MeshStatus.IDLE,
-    val evacuationRoute: String = "EXIT 4",
-    val threatZone: String = "NORTH HALL",
-    val locationLabel: String = "Detecting location...",
+    val evacuationRoute: String = "",
+    val threatZone: String = "",
+    val locationLabel: String = "",
     val locationTimestamp: String = "",
     val locationConfirmed: Boolean = false,
     val safetyStatus: SafetyStatus = SafetyStatus.UNKNOWN,

@@ -30,14 +30,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val detectionThreshold: Double = 450.0,
         val gateOpen: Boolean = false,
         val modelGunshotConfidence: Float = 0f,
-        val modelTopLabel: String = "unknown",
+        val modelTopLabel: String = "",
         val cooldownRemainingMs: Long = 0L,
         val isServiceRunning: Boolean = false,
         val meshStatus: MeshStatus = MeshStatus.IDLE,
-        val evacuationRoute: String = "EXIT 4",
-        val threatZone: String = "NORTH HALL",
-        val locationLabel: String = "123 Elm Street, Zagreb, Croatia",
-        val locationTimestamp: String = "14:37 - October 22, 2025",
+        val evacuationRoute: String = "",
+        val threatZone: String = "",
+        val locationLabel: String = "",
+        val locationTimestamp: String = "",
         val locationConfirmed: Boolean = false,
         val safetyStatus: SafetyStatus = SafetyStatus.UNKNOWN,
         val companionsCount: Int = 0,
@@ -116,6 +116,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun quickEvacuate(route: String = "SOUTH - EXIT 4") {
         orchestrator.quickEvacuate(route)
+    }
+
+    fun goBackToLocation() {
+        orchestrator.goBackToLocation()
+    }
+
+    fun goBackToSafetyCheck() {
+        orchestrator.goBackToSafetyCheck()
     }
 
     override fun onCleared() {

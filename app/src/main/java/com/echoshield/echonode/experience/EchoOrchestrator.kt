@@ -147,6 +147,14 @@ class EchoOrchestrator(
         triggerEvacuate(route)
     }
 
+    fun goBackToLocation() {
+        _uiState.value = _uiState.value.copy(appState = AppState.LOCATION_CONFIRMATION)
+    }
+
+    fun goBackToSafetyCheck() {
+        _uiState.value = _uiState.value.copy(appState = AppState.SAFETY_CHECK)
+    }
+
     private fun handleMeshPayload(payload: String) {
         when {
             payload.startsWith("ALERT:THREAT_DETECTED") -> transitionToIncidentFlow()

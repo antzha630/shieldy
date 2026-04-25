@@ -141,6 +141,7 @@ fun EchoShieldRoot() {
                     onConfirm = { isConfirmed -> viewModel.confirmLocation(isConfirmed) },
                     onQuickBarricade = { viewModel.quickBarricade() },
                     onQuickEvacuate = { viewModel.quickEvacuate() },
+                    onCancel = { viewModel.resetAlert() },
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -149,6 +150,7 @@ fun EchoShieldRoot() {
                     selectedStatus = uiState.safetyStatus,
                     onStatusSelected = { status -> viewModel.selectSafetyStatus(status) },
                     onNext = { viewModel.continueToIncidentReport() },
+                    onBack = { viewModel.goBackToLocation() },
                     onQuickBarricade = { viewModel.quickBarricade() },
                     onQuickEvacuate = { viewModel.quickEvacuate() },
                     modifier = Modifier.fillMaxSize()
@@ -166,6 +168,7 @@ fun EchoShieldRoot() {
                     onInjuredChange = { count -> viewModel.setInjuredCount(count) },
                     onNotesChange = { notes -> viewModel.setIncidentNotes(notes) },
                     onSubmit = { viewModel.submitIncidentReport() },
+                    onBack = { viewModel.goBackToSafetyCheck() },
                     onQuickBarricade = { viewModel.quickBarricade() },
                     onQuickEvacuate = { viewModel.quickEvacuate() },
                     modifier = Modifier.fillMaxSize()
