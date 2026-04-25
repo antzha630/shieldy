@@ -79,6 +79,12 @@ dependencies {
     // Google Play Services - Nearby Connections (CRITICAL for P2P Mesh)
     implementation("com.google.android.gms:play-services-nearby:19.0.0")
 
+    // Cloud relay scaffolding
+    implementation("com.squareup.retrofit2:retrofit:2.11.0")
+    implementation("com.squareup.retrofit2:converter-gson:2.11.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 

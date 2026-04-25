@@ -36,6 +36,9 @@
     <!-- Keep device awake during emergencies -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Optional cloud relay fallback -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:name=".EchoShieldApp"
         android:allowBackup="false"
