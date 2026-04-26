@@ -73,13 +73,41 @@ interface SensorGateway {
     fun setDetectionThreshold(threshold: Double)
 }
 
+data class WakeClassifyEvent(
+    val sessionId: String,
+    val sourceNodeId: String,
+    val latitude: Double,
+    val longitude: Double,
+    val timestamp: Long
+)
+
+data class ResponseTriggerEvent(
+    val sessionId: String,
+    val confirmedByNodes: List<String>,
+    val latitude: Double,
+    val longitude: Double,
+    val timestamp: Long
+)
+
 interface MeshGateway {
     val incomingAlerts: SharedFlow<String>
     val connectedPeers: StateFlow<Int>
     val meshStatus: StateFlow<MeshStatus>
+
+    val wakeClassifyRequests: SharedFlow<WakeClassifyEvent>
+    val responseTriggered: SharedFlow<ResponseTriggerEvent>
+    val sentinelDutyActive: StateFlow<Boolean>
+
     fun startMesh()
     fun stopMesh()
     fun broadcastThreat(zone: String)
     fun broadcastEvacuate(route: String)
     fun broadcastAllClear()
+
+    fun broadcastWakeClassify(latitude: Double, longitude: Double)
+    fun submitClassifyVote(sessionId: String, isGunshot: Boolean, confidence: Float)
+    fun disarmSentinel()
+    fun setConfirmationThreshold(threshold: Int)
+    fun getConfirmationThreshold(): Int
+    fun isSentinelDutyActive(): Boolean
 }

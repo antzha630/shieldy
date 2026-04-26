@@ -50,11 +50,19 @@ class MeshNetworkManager(context: Context) {
         private const val SEND_RETRY_DELAY_MS = 250L
         private const val SEND_RETRY_ATTEMPTS = 1
         private const val DUTY_REFRESH_MS = 15_000L
+        private const val VOTE_WINDOW_MS = 5_000L
+        private const val DEFAULT_CONFIRMATION_THRESHOLD = 2
 
         const val PAYLOAD_ALERT_PREFIX = "ALERT:"
         const val PAYLOAD_THREAT_DETECTED = "ALERT:THREAT_DETECTED"
         const val PAYLOAD_ALL_CLEAR = "ALERT:ALL_CLEAR"
         const val PAYLOAD_EVACUATE = "ALERT:EVACUATE"
+
+        const val PAYLOAD_WAKE_CLASSIFY = "WAKE:CLASSIFY"
+        const val PAYLOAD_CLASSIFY_VOTE = "VOTE:CLASSIFY"
+        const val PAYLOAD_SENTINEL_HANDOFF = "SENTINEL:HANDOFF"
+        const val PAYLOAD_SENTINEL_DISARM = "SENTINEL:DISARM"
+        const val PAYLOAD_RESPONSE_TRIGGER = "RESPONSE:TRIGGER"
 
         @Volatile
         private var instance: MeshNetworkManager? = null
@@ -96,9 +104,23 @@ class MeshNetworkManager(context: Context) {
     private val _dutyAssignment = MutableStateFlow(dutyCoordinator.assign(emptyList()))
     val dutyAssignment: StateFlow<DutyAssignment> = _dutyAssignment.asStateFlow()
 
+    private val _wakeClassifyRequests = MutableSharedFlow<WakeClassifyRequest>(extraBufferCapacity = 16)
+    val wakeClassifyRequests: SharedFlow<WakeClassifyRequest> = _wakeClassifyRequests.asSharedFlow()
+
+    private val _responseTriggered = MutableSharedFlow<ResponseTrigger>(extraBufferCapacity = 8)
+    val responseTriggered: SharedFlow<ResponseTrigger> = _responseTriggered.asSharedFlow()
+
+    private val _sentinelDutyActive = MutableStateFlow(true)
+    val sentinelDutyActive: StateFlow<Boolean> = _sentinelDutyActive.asStateFlow()
+
+    private val pendingVoteSessions = ConcurrentHashMap<String, VoteSession>()
+    @Volatile
+    private var confirmationThreshold = DEFAULT_CONFIRMATION_THRESHOLD
+
     private var isAdvertising = false
     private var isDiscovering = false
     private var dutyRotationJob: Job? = null
+    private var voteCleanupJob: Job? = null
 
     enum class MeshStatus {
         IDLE,
@@ -313,15 +335,18 @@ class MeshNetworkManager(context: Context) {
 
     fun startMesh() {
         startDutyRotation()
+        startVoteCleanup()
         startAdvertising()
         startDiscovery()
     }
 
     fun stopMesh() {
         stopDutyRotation()
+        stopVoteCleanup()
         stopAdvertising()
         stopDiscovery()
         disconnectAll()
+        pendingVoteSessions.clear()
     }
 
     fun stopAdvertising() {
@@ -398,6 +423,25 @@ class MeshNetworkManager(context: Context) {
     }
 
     private fun handleIncomingPayload(sourceEndpointId: String, message: String) {
+        when {
+            message.startsWith(PAYLOAD_WAKE_CLASSIFY) -> {
+                handleWakeClassify(message)
+                return
+            }
+            message.startsWith(PAYLOAD_CLASSIFY_VOTE) -> {
+                handleClassifyVote(message)
+                return
+            }
+            message.startsWith(PAYLOAD_SENTINEL_DISARM) -> {
+                handleSentinelDisarm(message)
+                return
+            }
+            message.startsWith(PAYLOAD_RESPONSE_TRIGGER) -> {
+                handleResponseTrigger(message)
+                return
+            }
+        }
+
         val alert = parseAlert(message)
         if (alert == null) {
             emitIncoming(message)
@@ -656,4 +700,330 @@ class MeshNetworkManager(context: Context) {
         val body: String?,
         val dedupeKey: String
     )
+
+    data class WakeClassifyRequest(
+        val sessionId: String,
+        val sourceNodeId: String,
+        val latitude: Double,
+        val longitude: Double,
+        val timestamp: Long
+    )
+
+    data class VoteSession(
+        val sessionId: String,
+        val startedAtMs: Long,
+        val sourceNodeId: String,
+        val latitude: Double,
+        val longitude: Double,
+        val votes: ConcurrentHashMap<String, ClassifyVote> = ConcurrentHashMap()
+    ) {
+        fun confirmedCount(): Int = votes.values.count { it.isGunshot }
+        fun totalVotes(): Int = votes.size
+    }
+
+    data class ClassifyVote(
+        val nodeId: String,
+        val isGunshot: Boolean,
+        val confidence: Float,
+        val timestamp: Long
+    )
+
+    data class ResponseTrigger(
+        val sessionId: String,
+        val confirmedByNodes: List<String>,
+        val latitude: Double,
+        val longitude: Double,
+        val timestamp: Long
+    )
+
+    fun setConfirmationThreshold(threshold: Int) {
+        confirmationThreshold = threshold.coerceAtLeast(1)
+        Log.i(TAG, "Confirmation threshold set to $confirmationThreshold")
+    }
+
+    fun getConfirmationThreshold(): Int = confirmationThreshold
+
+    fun broadcastWakeClassify(latitude: Double, longitude: Double) {
+        val sessionId = createMessageId()
+        val payload = buildString {
+            append(PAYLOAD_WAKE_CLASSIFY)
+            append("|")
+            append(sessionId)
+            append("|")
+            append(localEndpointName)
+            append("|")
+            append(latitude)
+            append("|")
+            append(longitude)
+            append("|")
+            append(System.currentTimeMillis())
+        }
+
+        val session = VoteSession(
+            sessionId = sessionId,
+            startedAtMs = System.currentTimeMillis(),
+            sourceNodeId = localEndpointName,
+            latitude = latitude,
+            longitude = longitude
+        )
+        session.votes[localEndpointName] = ClassifyVote(
+            nodeId = localEndpointName,
+            isGunshot = true,
+            confidence = 1.0f,
+            timestamp = System.currentTimeMillis()
+        )
+        pendingVoteSessions[sessionId] = session
+
+        markMessageSeen("wake:$sessionId")
+        sendPayloadToAllEndpoints(payload)
+        Log.i(TAG, "Broadcast WAKE_CLASSIFY sessionId=$sessionId lat=$latitude lon=$longitude")
+
+        checkVoteThreshold(sessionId)
+    }
+
+    fun submitClassifyVote(sessionId: String, isGunshot: Boolean, confidence: Float) {
+        val payload = buildString {
+            append(PAYLOAD_CLASSIFY_VOTE)
+            append("|")
+            append(sessionId)
+            append("|")
+            append(localEndpointName)
+            append("|")
+            append(if (isGunshot) "1" else "0")
+            append("|")
+            append(confidence)
+            append("|")
+            append(System.currentTimeMillis())
+        }
+
+        markMessageSeen("vote:$sessionId:$localEndpointName")
+        sendPayloadToAllEndpoints(payload)
+        Log.d(TAG, "Submitted vote for session=$sessionId gunshot=$isGunshot conf=$confidence")
+
+        pendingVoteSessions[sessionId]?.let { session ->
+            session.votes[localEndpointName] = ClassifyVote(
+                nodeId = localEndpointName,
+                isGunshot = isGunshot,
+                confidence = confidence,
+                timestamp = System.currentTimeMillis()
+            )
+            checkVoteThreshold(sessionId)
+        }
+    }
+
+    fun disarmSentinel() {
+        dutyCoordinator.disarmSentinel()
+        _sentinelDutyActive.value = false
+        updateDutyAssignment()
+
+        val payload = buildString {
+            append(PAYLOAD_SENTINEL_DISARM)
+            append("|")
+            append(createMessageId())
+            append("|")
+            append(localEndpointName)
+        }
+        sendPayloadToAllEndpoints(payload)
+        Log.i(TAG, "Sentinel disarmed and handoff broadcast")
+    }
+
+    fun isSentinelDutyActive(): Boolean = _dutyAssignment.value.audioSentinelDuty
+
+    private fun handleWakeClassify(message: String) {
+        val parts = message.split("|")
+        if (parts.size < 6) return
+
+        val sessionId = parts[1]
+        val sourceNodeId = parts[2]
+        val latitude = parts[3].toDoubleOrNull() ?: return
+        val longitude = parts[4].toDoubleOrNull() ?: return
+        val timestamp = parts[5].toLongOrNull() ?: System.currentTimeMillis()
+
+        if (!markMessageSeen("wake:$sessionId")) {
+            Log.d(TAG, "Dropping duplicate WAKE_CLASSIFY $sessionId")
+            return
+        }
+
+        pendingVoteSessions.computeIfAbsent(sessionId) {
+            VoteSession(
+                sessionId = sessionId,
+                startedAtMs = System.currentTimeMillis(),
+                sourceNodeId = sourceNodeId,
+                latitude = latitude,
+                longitude = longitude
+            )
+        }
+
+        sendPayloadToAllEndpoints(message)
+
+        val request = WakeClassifyRequest(
+            sessionId = sessionId,
+            sourceNodeId = sourceNodeId,
+            latitude = latitude,
+            longitude = longitude,
+            timestamp = timestamp
+        )
+        scope.launch {
+            _wakeClassifyRequests.emit(request)
+        }
+
+        Log.i(TAG, "Received WAKE_CLASSIFY session=$sessionId from $sourceNodeId")
+    }
+
+    private fun handleClassifyVote(message: String) {
+        val parts = message.split("|")
+        if (parts.size < 6) return
+
+        val sessionId = parts[1]
+        val voterNodeId = parts[2]
+        val isGunshot = parts[3] == "1"
+        val confidence = parts[4].toFloatOrNull() ?: 0f
+        val timestamp = parts[5].toLongOrNull() ?: System.currentTimeMillis()
+
+        val dedupeKey = "vote:$sessionId:$voterNodeId"
+        if (!markMessageSeen(dedupeKey)) {
+            Log.d(TAG, "Dropping duplicate vote from $voterNodeId for $sessionId")
+            return
+        }
+
+        sendPayloadToAllEndpoints(message)
+
+        val session = pendingVoteSessions[sessionId]
+        if (session == null) {
+            Log.w(TAG, "Vote received for unknown session $sessionId")
+            return
+        }
+
+        session.votes[voterNodeId] = ClassifyVote(
+            nodeId = voterNodeId,
+            isGunshot = isGunshot,
+            confidence = confidence,
+            timestamp = timestamp
+        )
+
+        Log.d(TAG, "Vote recorded: session=$sessionId voter=$voterNodeId gunshot=$isGunshot (${session.confirmedCount()}/${confirmationThreshold} needed)")
+
+        checkVoteThreshold(sessionId)
+    }
+
+    private fun handleSentinelDisarm(message: String) {
+        val parts = message.split("|")
+        if (parts.size < 3) return
+
+        val messageId = parts[1]
+        val sourceNode = parts[2]
+
+        if (!markMessageSeen("disarm:$messageId")) return
+
+        sendPayloadToAllEndpoints(message)
+        dutyCoordinator.forceSentinelHandoff()
+        updateDutyAssignment()
+        Log.i(TAG, "Sentinel disarm received from $sourceNode, forcing handoff")
+    }
+
+    private fun checkVoteThreshold(sessionId: String) {
+        val session = pendingVoteSessions[sessionId] ?: return
+
+        val confirmedCount = session.confirmedCount()
+        Log.d(TAG, "Vote check: session=$sessionId confirmed=$confirmedCount threshold=$confirmationThreshold")
+
+        if (confirmedCount >= confirmationThreshold) {
+            val confirmedNodes = session.votes.entries
+                .filter { it.value.isGunshot }
+                .map { it.key }
+
+            val trigger = ResponseTrigger(
+                sessionId = sessionId,
+                confirmedByNodes = confirmedNodes,
+                latitude = session.latitude,
+                longitude = session.longitude,
+                timestamp = System.currentTimeMillis()
+            )
+
+            scope.launch {
+                _responseTriggered.emit(trigger)
+            }
+
+            broadcastResponseTrigger(session)
+            pendingVoteSessions.remove(sessionId)
+            Log.w(TAG, "RESPONSE TRIGGERED! session=$sessionId confirmedBy=$confirmedNodes")
+        }
+    }
+
+    private fun broadcastResponseTrigger(session: VoteSession) {
+        val confirmedNodes = session.votes.entries
+            .filter { it.value.isGunshot }
+            .map { it.key }
+            .joinToString(",")
+
+        val payload = buildString {
+            append(PAYLOAD_RESPONSE_TRIGGER)
+            append("|")
+            append(session.sessionId)
+            append("|")
+            append(session.latitude)
+            append("|")
+            append(session.longitude)
+            append("|")
+            append(confirmedNodes)
+            append("|")
+            append(System.currentTimeMillis())
+        }
+
+        sendPayloadToAllEndpoints(payload)
+    }
+
+    private fun handleResponseTrigger(message: String) {
+        val parts = message.split("|")
+        if (parts.size < 6) return
+
+        val sessionId = parts[1]
+        val latitude = parts[2].toDoubleOrNull() ?: return
+        val longitude = parts[3].toDoubleOrNull() ?: return
+        val confirmedNodes = parts[4].split(",").filter { it.isNotBlank() }
+        val timestamp = parts[5].toLongOrNull() ?: System.currentTimeMillis()
+
+        val dedupeKey = "response:$sessionId"
+        if (!markMessageSeen(dedupeKey)) return
+
+        sendPayloadToAllEndpoints(message)
+
+        val trigger = ResponseTrigger(
+            sessionId = sessionId,
+            confirmedByNodes = confirmedNodes,
+            latitude = latitude,
+            longitude = longitude,
+            timestamp = timestamp
+        )
+
+        scope.launch {
+            _responseTriggered.emit(trigger)
+        }
+
+        pendingVoteSessions.remove(sessionId)
+        Log.w(TAG, "RESPONSE_TRIGGER received: session=$sessionId at ($latitude, $longitude)")
+    }
+
+    private fun startVoteCleanup() {
+        if (voteCleanupJob?.isActive == true) return
+        voteCleanupJob = scope.launch {
+            while (true) {
+                delay(VOTE_WINDOW_MS)
+                val now = System.currentTimeMillis()
+                val expiredSessions = pendingVoteSessions.entries
+                    .filter { now - it.value.startedAtMs > VOTE_WINDOW_MS * 2 }
+                    .map { it.key }
+
+                expiredSessions.forEach { sessionId ->
+                    pendingVoteSessions.remove(sessionId)
+                    Log.d(TAG, "Expired vote session: $sessionId")
+                }
+            }
+        }
+    }
+
+    private fun stopVoteCleanup() {
+        voteCleanupJob?.cancel()
+        voteCleanupJob = null
+    }
 }

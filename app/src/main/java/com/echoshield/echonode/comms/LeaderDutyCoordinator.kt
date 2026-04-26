@@ -2,11 +2,20 @@ package com.echoshield.echonode.comms
 
 class LeaderDutyCoordinator(
     private val localNodeId: String,
-    private val rotationWindowMs: Long = DEFAULT_ROTATION_WINDOW_MS
+    private val rotationWindowMs: Long = DEFAULT_ROTATION_WINDOW_MS,
+    private val sentinelRotationWindowMs: Long = DEFAULT_SENTINEL_ROTATION_WINDOW_MS
 ) {
     companion object {
         private const val DEFAULT_ROTATION_WINDOW_MS = 60_000L
+        private const val DEFAULT_SENTINEL_ROTATION_WINDOW_MS = 30_000L
+        const val DEFAULT_SENTINEL_DISARM_MS = 30_000L
     }
+
+    @Volatile
+    private var sentinelDisarmedUntilMs: Long = 0L
+
+    @Volatile
+    private var sentinelEpochOffset: Int = 0
 
     fun assign(
         peers: Collection<MeshPeer>,
@@ -23,17 +32,49 @@ class LeaderDutyCoordinator(
         val leaderNodeId = safeMembers[leaderIndex]
         val isLocalLeader = leaderNodeId == localNodeId
 
+        val sentinelEpoch = if (sentinelRotationWindowMs > 0L) {
+            nowMs / sentinelRotationWindowMs
+        } else 0L
+
+        val effectiveSentinelIndex = ((sentinelEpoch + sentinelEpochOffset) % safeMembers.size).toInt()
+        val sentinelNodeId = safeMembers[effectiveSentinelIndex]
+
+        val isSentinelDisarmed = nowMs < sentinelDisarmedUntilMs
+        val isLocalSentinel = sentinelNodeId == localNodeId && !isSentinelDisarmed
+
+        val duties = buildSet {
+            add(MeshDuty.MESH_RELAY)
+            if (isLocalLeader) {
+                add(MeshDuty.CLOUD_RELAY)
+            }
+            if (isLocalSentinel) {
+                add(MeshDuty.AUDIO_SENTINEL)
+            }
+        }
+
         return DutyAssignment(
             epoch = epoch,
+            sentinelEpoch = sentinelEpoch,
             localNodeId = localNodeId,
             leaderNodeId = leaderNodeId,
+            sentinelNodeId = if (isSentinelDisarmed) null else sentinelNodeId,
             memberNodeIds = safeMembers,
-            duties = if (isLocalLeader) {
-                setOf(MeshDuty.MESH_RELAY, MeshDuty.CLOUD_RELAY)
-            } else {
-                setOf(MeshDuty.MESH_RELAY)
-            }
+            duties = duties,
+            sentinelDisarmed = isSentinelDisarmed
         )
+    }
+
+    fun disarmSentinel(durationMs: Long = DEFAULT_SENTINEL_DISARM_MS) {
+        sentinelDisarmedUntilMs = System.currentTimeMillis() + durationMs
+        sentinelEpochOffset++
+    }
+
+    fun forceSentinelHandoff() {
+        sentinelEpochOffset++
+    }
+
+    fun isSentinelDisarmed(nowMs: Long = System.currentTimeMillis()): Boolean {
+        return nowMs < sentinelDisarmedUntilMs
     }
 
     data class MeshPeer(
@@ -44,16 +85,22 @@ class LeaderDutyCoordinator(
 
 data class DutyAssignment(
     val epoch: Long,
+    val sentinelEpoch: Long = 0L,
     val localNodeId: String,
     val leaderNodeId: String,
+    val sentinelNodeId: String? = null,
     val memberNodeIds: List<String>,
-    val duties: Set<MeshDuty>
+    val duties: Set<MeshDuty>,
+    val sentinelDisarmed: Boolean = false
 ) {
     val isLocalLeader: Boolean = localNodeId == leaderNodeId
+    val isLocalSentinel: Boolean = MeshDuty.AUDIO_SENTINEL in duties
     val cloudRelayDuty: Boolean = MeshDuty.CLOUD_RELAY in duties
+    val audioSentinelDuty: Boolean = MeshDuty.AUDIO_SENTINEL in duties
 }
 
 enum class MeshDuty {
     MESH_RELAY,
-    CLOUD_RELAY
+    CLOUD_RELAY,
+    AUDIO_SENTINEL
 }

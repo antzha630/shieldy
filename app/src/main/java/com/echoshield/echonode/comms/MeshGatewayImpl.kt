@@ -3,13 +3,17 @@ package com.echoshield.echonode.comms
 import android.content.Context
 import com.echoshield.echonode.core.contracts.MeshGateway
 import com.echoshield.echonode.core.contracts.MeshStatus
+import com.echoshield.echonode.core.contracts.ResponseTriggerEvent
+import com.echoshield.echonode.core.contracts.WakeClassifyEvent
 import com.echoshield.echonode.data.MeshNetworkManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
@@ -23,6 +27,15 @@ class MeshGatewayImpl(context: Context) : MeshGateway {
     private val _meshStatus = MutableStateFlow(MeshStatus.IDLE)
     override val meshStatus: StateFlow<MeshStatus> = _meshStatus.asStateFlow()
 
+    private val _wakeClassifyRequests = MutableSharedFlow<WakeClassifyEvent>(extraBufferCapacity = 16)
+    override val wakeClassifyRequests: SharedFlow<WakeClassifyEvent> = _wakeClassifyRequests.asSharedFlow()
+
+    private val _responseTriggered = MutableSharedFlow<ResponseTriggerEvent>(extraBufferCapacity = 8)
+    override val responseTriggered: SharedFlow<ResponseTriggerEvent> = _responseTriggered.asSharedFlow()
+
+    private val _sentinelDutyActive = MutableStateFlow(true)
+    override val sentinelDutyActive: StateFlow<Boolean> = _sentinelDutyActive.asStateFlow()
+
     init {
         scope.launch {
             meshManager.meshStatus.collect { status ->
@@ -33,6 +46,40 @@ class MeshGatewayImpl(context: Context) : MeshGateway {
                     MeshNetworkManager.MeshStatus.CONNECTED -> MeshStatus.CONNECTED
                     MeshNetworkManager.MeshStatus.ERROR -> MeshStatus.ERROR
                 }
+            }
+        }
+
+        scope.launch {
+            meshManager.wakeClassifyRequests.collect { request ->
+                _wakeClassifyRequests.emit(
+                    WakeClassifyEvent(
+                        sessionId = request.sessionId,
+                        sourceNodeId = request.sourceNodeId,
+                        latitude = request.latitude,
+                        longitude = request.longitude,
+                        timestamp = request.timestamp
+                    )
+                )
+            }
+        }
+
+        scope.launch {
+            meshManager.responseTriggered.collect { trigger ->
+                _responseTriggered.emit(
+                    ResponseTriggerEvent(
+                        sessionId = trigger.sessionId,
+                        confirmedByNodes = trigger.confirmedByNodes,
+                        latitude = trigger.latitude,
+                        longitude = trigger.longitude,
+                        timestamp = trigger.timestamp
+                    )
+                )
+            }
+        }
+
+        scope.launch {
+            meshManager.sentinelDutyActive.collect { active ->
+                _sentinelDutyActive.value = active
             }
         }
     }
@@ -46,4 +93,19 @@ class MeshGatewayImpl(context: Context) : MeshGateway {
     override fun broadcastEvacuate(route: String) = meshManager.broadcastEvacuate(route)
 
     override fun broadcastAllClear() = meshManager.broadcastAllClear()
+
+    override fun broadcastWakeClassify(latitude: Double, longitude: Double) =
+        meshManager.broadcastWakeClassify(latitude, longitude)
+
+    override fun submitClassifyVote(sessionId: String, isGunshot: Boolean, confidence: Float) =
+        meshManager.submitClassifyVote(sessionId, isGunshot, confidence)
+
+    override fun disarmSentinel() = meshManager.disarmSentinel()
+
+    override fun setConfirmationThreshold(threshold: Int) =
+        meshManager.setConfirmationThreshold(threshold)
+
+    override fun getConfirmationThreshold(): Int = meshManager.getConfirmationThreshold()
+
+    override fun isSentinelDutyActive(): Boolean = meshManager.isSentinelDutyActive()
 }

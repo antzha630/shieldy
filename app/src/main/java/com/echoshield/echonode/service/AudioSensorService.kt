@@ -20,12 +20,14 @@ import com.echoshield.echonode.MainActivity
 import com.echoshield.echonode.R
 import com.echoshield.echonode.data.MeshNetworkManager
 import com.echoshield.echonode.data.SystemEventFlow
+import com.echoshield.echonode.sensor.LocationProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.sqrt
@@ -106,12 +108,31 @@ class AudioSensorService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var meshNetworkManager: MeshNetworkManager
     private lateinit var gunshotClassifier: GunshotClassifier
+    private var locationProvider: LocationProvider? = null
     
     // Two-tier detector state
     private var lastTriggerTime = 0L
     private var smoothedAmplitude = 0.0
     private var consecutiveHighConfidence = 0
     private var currentGateOpen = false
+
+    // Sentinel duty state - controls whether this device captures audio at all
+    @Volatile
+    private var isSentinelActive = true
+    @Volatile
+    private var isProcessingWakeRequest = false
+    @Volatile
+    private var pendingWakeSessionId: String? = null
+    private var dutyMonitorJob: Job? = null
+    private var wakeRequestJob: Job? = null
+    
+    // Wake capture state - when non-sentinel is woken, briefly capture audio for classification
+    private val wakeAudioBuffer = FloatArray(MODEL_INPUT_SAMPLES)
+    @Volatile
+    private var wakeBufferWriteIndex = 0
+    @Volatile
+    private var wakeBufferFilled = false
+    private var wakeCaptureSamplesNeeded = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -120,6 +141,7 @@ class AudioSensorService : Service() {
         acquireWakeLock()
         meshNetworkManager = MeshNetworkManager.getInstance(applicationContext)
         gunshotClassifier = GunshotClassifier(applicationContext)
+        locationProvider = LocationProvider(applicationContext)
         val modelInitialized = gunshotClassifier.initialize()
         Log.i(TAG, "Gunshot classifier initialized: $modelInitialized")
     }
@@ -129,20 +151,145 @@ class AudioSensorService : Service() {
         
         startForegroundWithNotification()
         meshNetworkManager.startMesh()
-        startAudioRecording()
+        startDutyMonitoring()
+        startWakeRequestHandling()
+        
+        // Only start audio recording if we're the sentinel
+        // Duty monitoring will start/stop recording based on assignment
+        val assignment = meshNetworkManager.dutyAssignment.value
+        isSentinelActive = assignment.audioSentinelDuty
+        if (isSentinelActive) {
+            Log.i(TAG, "Starting as SENTINEL - audio capture active")
+            startAudioRecording()
+        } else {
+            Log.i(TAG, "Starting as NON-SENTINEL - audio capture paused (battery saving)")
+        }
         
         SystemEventFlow.setServiceRunning(true)
         
         return START_STICKY
     }
 
+    private fun startDutyMonitoring() {
+        if (dutyMonitorJob?.isActive == true) return
+
+        dutyMonitorJob = serviceScope.launch(Dispatchers.Main) {
+            meshNetworkManager.dutyAssignment.collect { assignment ->
+                val wasActive = isSentinelActive
+                isSentinelActive = assignment.audioSentinelDuty
+
+                if (wasActive != isSentinelActive) {
+                    Log.i(TAG, "Sentinel duty changed: active=$isSentinelActive (leader=${assignment.sentinelNodeId})")
+                    
+                    if (isSentinelActive) {
+                        // Became sentinel - start audio capture
+                        startAudioRecording()
+                    } else {
+                        // No longer sentinel - stop audio capture to save battery
+                        stopAudioRecording()
+                        currentGateOpen = false
+                        consecutiveHighConfidence = 0
+                        SystemEventFlow.updateGateOpen(false)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startWakeRequestHandling() {
+        if (wakeRequestJob?.isActive == true) return
+
+        wakeRequestJob = serviceScope.launch(Dispatchers.Main) {
+            meshNetworkManager.wakeClassifyRequests.collect { request ->
+                Log.i(TAG, "Received WAKE_CLASSIFY request: session=${request.sessionId}")
+                handleWakeClassifyRequest(request.sessionId)
+            }
+        }
+    }
+
+    private fun handleWakeClassifyRequest(sessionId: String) {
+        if (isProcessingWakeRequest) {
+            Log.d(TAG, "Already processing wake request, skipping")
+            return
+        }
+
+        // If we're the sentinel, we already have audio - classify immediately
+        if (isSentinelActive && audioRecordingJob?.isActive == true) {
+            classifyAndVote(sessionId)
+            return
+        }
+
+        // Not sentinel - need to start temporary audio capture
+        isProcessingWakeRequest = true
+        pendingWakeSessionId = sessionId
+        wakeBufferWriteIndex = 0
+        wakeBufferFilled = false
+        wakeCaptureSamplesNeeded = MODEL_INPUT_SAMPLES
+        
+        Log.i(TAG, "Starting wake audio capture for session=$sessionId")
+        startAudioRecording()
+    }
+
+    private fun classifyAndVote(sessionId: String) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                isProcessingWakeRequest = true
+                
+                // Use wake buffer if we captured fresh audio, otherwise use rolling buffer
+                val modelInput = if (wakeBufferFilled) {
+                    snapshotWakeBuffer()
+                } else {
+                    // Fallback - shouldn't happen often
+                    Log.w(TAG, "Wake buffer not filled, using empty classification")
+                    FloatArray(MODEL_INPUT_SAMPLES)
+                }
+                
+                val result = gunshotClassifier.classify(modelInput)
+
+                if (result != null) {
+                    val isGunshot = result.gunshotConfidence >= GUNSHOT_CONFIDENCE_THRESHOLD
+                    Log.i(TAG, "Wake classify result: gunshot=$isGunshot conf=${result.gunshotConfidence} top=${result.topLabel}")
+                    meshNetworkManager.submitClassifyVote(sessionId, isGunshot, result.gunshotConfidence)
+                    SystemEventFlow.updateModelInference(result.gunshotConfidence, result.topLabel)
+                } else {
+                    Log.w(TAG, "Classifier returned null for $sessionId")
+                    meshNetworkManager.submitClassifyVote(sessionId, false, 0f)
+                }
+            } finally {
+                isProcessingWakeRequest = false
+                pendingWakeSessionId = null
+                
+                // If not sentinel, stop audio capture after classification
+                if (!isSentinelActive) {
+                    serviceScope.launch(Dispatchers.Main) {
+                        stopAudioRecording()
+                        Log.d(TAG, "Stopped wake audio capture (not sentinel)")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun snapshotWakeBuffer(): FloatArray {
+        val output = FloatArray(MODEL_INPUT_SAMPLES)
+        val tailSize = wakeAudioBuffer.size - wakeBufferWriteIndex
+        System.arraycopy(wakeAudioBuffer, wakeBufferWriteIndex, output, 0, tailSize)
+        System.arraycopy(wakeAudioBuffer, 0, output, tailSize, wakeBufferWriteIndex)
+        return output
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
         Log.d(TAG, "Service destroyed")
+        dutyMonitorJob?.cancel()
+        dutyMonitorJob = null
+        wakeRequestJob?.cancel()
+        wakeRequestJob = null
         stopAudioRecording()
         meshNetworkManager.stopMesh()
         gunshotClassifier.close()
+        locationProvider?.stopLocationUpdates()
         releaseWakeLock()
         serviceScope.cancel()
         SystemEventFlow.setServiceRunning(false)
@@ -271,15 +418,53 @@ class AudioSensorService : Service() {
         var lastAmplitudeUpdate = 0L
         var lastModelInference = 0L
 
+        if (isSentinelActive) {
+            locationProvider?.startLocationUpdates()
+        }
+
         while (audioRecordingJob?.isActive == true) {
             val readResult = audioRecord?.read(buffer, 0, buffer.size) ?: -1
 
             if (readResult > 0) {
+                val currentTime = System.currentTimeMillis()
+                
+                // MODE 1: Wake capture mode (non-sentinel responding to WAKE_CLASSIFY)
+                if (isProcessingWakeRequest && !isSentinelActive) {
+                    appendToRollingBuffer(
+                        source = buffer,
+                        size = readResult,
+                        destination = wakeAudioBuffer,
+                        writeIndex = wakeBufferWriteIndex
+                    ).also { (newIndex, didWrap) ->
+                        wakeBufferWriteIndex = newIndex
+                        if (didWrap) {
+                            wakeBufferFilled = true
+                        }
+                    }
+
+                    // Check if we have enough samples to classify
+                    if (wakeBufferFilled) {
+                        val sessionId = pendingWakeSessionId
+                        if (sessionId != null) {
+                            Log.i(TAG, "Wake buffer filled, classifying for session=$sessionId")
+                            classifyAndVote(sessionId)
+                        }
+                    }
+                    continue
+                }
+
+                // MODE 2: Sentinel mode - full detection pipeline
+                if (!isSentinelActive) {
+                    // Not sentinel and not processing wake request - shouldn't be recording
+                    continue
+                }
+
                 val instantRms = calculateRMS(buffer, readResult)
                 
                 // TIER 1: Apply EMA smoothing for stable gate decisions
                 smoothedAmplitude = EMA_ALPHA * instantRms + (1 - EMA_ALPHA) * smoothedAmplitude
                 
+                // Append to rolling buffer for ML input
                 appendToRollingBuffer(
                     source = buffer,
                     size = readResult,
@@ -292,7 +477,19 @@ class AudioSensorService : Service() {
                     }
                 }
 
-                val currentTime = System.currentTimeMillis()
+                // Also fill wake buffer in case we need to vote on our own detection
+                appendToRollingBuffer(
+                    source = buffer,
+                    size = readResult,
+                    destination = wakeAudioBuffer,
+                    writeIndex = wakeBufferWriteIndex
+                ).also { (newIndex, didWrap) ->
+                    wakeBufferWriteIndex = newIndex
+                    if (didWrap) {
+                        wakeBufferFilled = true
+                    }
+                }
+
                 val cooldownRemaining = maxOf(0L, TRIGGER_COOLDOWN_MS - (currentTime - lastTriggerTime))
                 
                 // Update telemetry at fixed interval
@@ -348,12 +545,26 @@ class AudioSensorService : Service() {
                             cooldownRemaining == 0L) {
                             Log.w(
                                 TAG,
-                                "ML THREAT DETECTED! gunshot=${result.gunshotConfidence} " +
+                                "SENTINEL DETECTED THREAT! gunshot=${result.gunshotConfidence} " +
                                 "consecutive=$consecutiveHighConfidence top=${result.topLabel}"
                             )
                             lastTriggerTime = currentTime
                             consecutiveHighConfidence = 0
-                            SystemEventFlow.emitLocalTrigger()
+                            
+                            // Get current location
+                            val location = locationProvider?.currentLocation?.value
+                            val lat = location?.latitude ?: 0.0
+                            val lon = location?.longitude ?: 0.0
+                            
+                            // Disarm self as sentinel (prevents re-trigger from same source)
+                            // and broadcast WAKE_CLASSIFY to wake up other phones
+                            meshNetworkManager.disarmSentinel()
+                            meshNetworkManager.broadcastWakeClassify(lat, lon)
+                            
+                            Log.i(TAG, "Sentinel disarmed, WAKE_CLASSIFY broadcast at ($lat, $lon)")
+                            
+                            // Note: Audio recording will stop when duty assignment updates
+                            // and isSentinelActive becomes false
                         }
                     }
                 }
@@ -437,6 +648,11 @@ class AudioSensorService : Service() {
         smoothedAmplitude = 0.0
         consecutiveHighConfidence = 0
         currentGateOpen = false
+        
+        // Reset wake buffer state
+        wakeBufferWriteIndex = 0
+        wakeBufferFilled = false
+        wakeCaptureSamplesNeeded = 0
         
         SystemEventFlow.updateAmplitude(0.0)
         SystemEventFlow.updateSmoothedAmplitude(0.0)
