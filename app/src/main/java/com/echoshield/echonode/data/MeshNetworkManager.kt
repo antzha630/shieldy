@@ -597,6 +597,29 @@ class MeshNetworkManager(context: Context) {
         return latitude != 0.0 || longitude != 0.0
     }
 
+    fun publishConfirmedResponseTrigger(
+        sessionId: String,
+        confirmedByNodes: List<String>,
+        latitude: Double,
+        longitude: Double,
+        timestamp: Long = System.currentTimeMillis()
+    ) {
+        val trigger = ResponseTrigger(
+            sessionId = sessionId,
+            confirmedByNodes = confirmedByNodes,
+            latitude = latitude,
+            longitude = longitude,
+            timestamp = timestamp
+        )
+        val payload = responseTriggerPayload(trigger)
+
+        markMessageSeen("response:$sessionId")
+        rememberLatestAlertState(payload)
+        sendPayloadToAllEndpoints(payload)
+        publishResponseTriggerToCloud(trigger, sourceEndpointId = null, force = true)
+        Log.i(TAG, "Published confirmed response trigger session=$sessionId confirmedBy=$confirmedByNodes")
+    }
+
     private fun publishLocalAlert(type: String, body: String? = null) {
         val payload = buildString {
             append(type)
@@ -1189,26 +1212,35 @@ class MeshNetworkManager(context: Context) {
         }
     }
 
-    private fun broadcastResponseTrigger(session: VoteSession) {
-        val confirmedNodes = session.votes.entries
-            .filter { it.value.isGunshot }
-            .map { it.key }
-            .joinToString(",")
-
-        val payload = buildString {
+    private fun responseTriggerPayload(trigger: ResponseTrigger): String {
+        return buildString {
             append(PAYLOAD_RESPONSE_TRIGGER)
             append("|")
-            append(session.sessionId)
+            append(trigger.sessionId)
             append("|")
-            append(session.latitude)
+            append(trigger.latitude)
             append("|")
-            append(session.longitude)
+            append(trigger.longitude)
             append("|")
-            append(confirmedNodes)
+            append(trigger.confirmedByNodes.joinToString(","))
             append("|")
-            append(System.currentTimeMillis())
+            append(trigger.timestamp)
         }
+    }
 
+    private fun broadcastResponseTrigger(session: VoteSession) {
+        val trigger = ResponseTrigger(
+            sessionId = session.sessionId,
+            confirmedByNodes = session.votes.entries
+                .filter { it.value.isGunshot }
+                .map { it.key },
+            latitude = session.latitude,
+            longitude = session.longitude,
+            timestamp = System.currentTimeMillis()
+        )
+        val payload = responseTriggerPayload(trigger)
+
+        rememberLatestAlertState(payload)
         sendPayloadToAllEndpoints(payload)
     }
 
@@ -1245,9 +1277,13 @@ class MeshNetworkManager(context: Context) {
         Log.w(TAG, "RESPONSE_TRIGGER received: session=$sessionId at ($latitude, $longitude)")
     }
 
-    private fun publishResponseTriggerToCloud(trigger: ResponseTrigger, sourceEndpointId: String?) {
+    private fun publishResponseTriggerToCloud(
+        trigger: ResponseTrigger,
+        sourceEndpointId: String?,
+        force: Boolean = false
+    ) {
         val assignment = _dutyAssignment.value
-        if (!cloudRelayClient.isEnabled || !assignment.cloudRelayDuty) {
+        if (!cloudRelayClient.isEnabled || (!force && !assignment.cloudRelayDuty)) {
             return
         }
 
@@ -1255,19 +1291,7 @@ class MeshNetworkManager(context: Context) {
             connectedEndpoints[endpointId] ?: pendingEndpointNames[endpointId] ?: endpointId
         } ?: localEndpointName
 
-        val payload = buildString {
-            append(PAYLOAD_RESPONSE_TRIGGER)
-            append("|")
-            append(trigger.sessionId)
-            append("|")
-            append(trigger.latitude)
-            append("|")
-            append(trigger.longitude)
-            append("|")
-            append(trigger.confirmedByNodes.joinToString(","))
-            append("|")
-            append(trigger.timestamp)
-        }
+        val payload = responseTriggerPayload(trigger)
 
         val envelope = CloudRelayEnvelope(
             protocolVersion = 1,

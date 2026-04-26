@@ -1,5 +1,6 @@
 package com.echoshield.echonode.experience
 
+import android.util.Log
 import com.echoshield.echonode.core.contracts.AppState
 import com.echoshield.echonode.core.contracts.CloudGateway
 import com.echoshield.echonode.core.contracts.EchoUiState
@@ -7,6 +8,7 @@ import com.echoshield.echonode.core.contracts.IncidentReportDraft
 import com.echoshield.echonode.core.contracts.MeshGateway
 import com.echoshield.echonode.core.contracts.ResponseTriggerEvent
 import com.echoshield.echonode.core.contracts.SafetyStatus
+import com.echoshield.echonode.core.contracts.ServerIncidentUpdate
 import com.echoshield.echonode.core.contracts.SensorGateway
 import com.echoshield.echonode.core.contracts.ThreatZone
 import com.echoshield.echonode.sensor.LocationProvider
@@ -31,6 +33,7 @@ class EchoOrchestrator(
     private val locationProvider: LocationProvider? = null
 ) {
     companion object {
+        private const val TAG = "EchoOrchestrator"
         private const val EARTH_RADIUS_METERS = 6_371_000.0
         private const val DISTANCE_VERY_CLOSE_M = 50.0
         private const val DISTANCE_CLOSE_M = 150.0
@@ -97,6 +100,7 @@ class EchoOrchestrator(
         scope.launch {
             cloudGateway.latestIncident.collect { incident ->
                 if (incident == null) return@collect
+                handleConfirmedCloudIncident(incident)
                 _uiState.value = _uiState.value.copy(
                     serverIncidentId = incident.incidentId,
                     serverRecommendedAction = incident.recommendedAction,
@@ -127,6 +131,40 @@ class EchoOrchestrator(
                     )
                 }
             }
+        }
+    }
+
+    private fun handleConfirmedCloudIncident(incident: ServerIncidentUpdate) {
+        if (incident.status != "CONFIRMED_RESPONSE") return
+
+        val sessionId = incident.incidentId.removePrefix("session-").ifBlank { incident.incidentId }
+        if (barricadeSplashShownForSessionId == sessionId) return
+
+        val latitude = incident.threatLatitude ?: _uiState.value.threatLatitude
+        val longitude = incident.threatLongitude ?: _uiState.value.threatLongitude
+        val confirmedNodes = List(incident.confirmedByCount.coerceAtLeast(1)) { index ->
+            "cloud-confirmed-${index + 1}"
+        }
+
+        if (latitude != 0.0 || longitude != 0.0) {
+            handleResponseTrigger(
+                ResponseTriggerEvent(
+                    sessionId = sessionId,
+                    confirmedByNodes = confirmedNodes,
+                    latitude = latitude,
+                    longitude = longitude,
+                    timestamp = System.currentTimeMillis()
+                )
+            )
+        } else {
+            barricadeSplashShownForSessionId = sessionId
+            lastThreatSessionId = sessionId
+            _uiState.value = _uiState.value.copy(
+                appState = AppState.BARRICADE,
+                threatZone = "Threat confirmed by ${incident.confirmedByCount.coerceAtLeast(1)} devices",
+                evacuationRoute = DEFAULT_EVACUATION_ROUTE,
+                relativeLocation = incident.recommendedAction
+            )
         }
     }
 
@@ -186,6 +224,11 @@ class EchoOrchestrator(
                 )
             ),
             threatRadiusMeters = (50.0 + trigger.confirmedByNodes.size * 20.0).coerceAtMost(250.0)
+        )
+        Log.w(
+            TAG,
+            "Response trigger session=${trigger.sessionId} confirmed=${trigger.confirmedByNodes.size} " +
+                "showBarricade=$shouldShowBarricadeSplash appState=${_uiState.value.appState}"
         )
     }
 
@@ -305,9 +348,11 @@ class EchoOrchestrator(
 
         // Process this trigger through the normal flow (sets threatLatitude, threatLongitude, etc.)
         handleResponseTrigger(simulatedTrigger)
+        Log.w(TAG, "Manual test alert confirmed session=$sessionId")
 
-        // Also broadcast to peers if any are connected
-        meshGateway.broadcastThreat(_uiState.value.threatZone)
+        // Publish the confirmed response, not just the pre-confirmation alert.
+        // This makes the demo button mirror a two-device confirmation on the relay/server console.
+        meshGateway.publishConfirmedResponse(simulatedTrigger)
     }
 
     /**

@@ -101,6 +101,15 @@ class MeshGatewayImpl(context: Context) : MeshGateway {
     override fun submitClassifyVote(sessionId: String, isGunshot: Boolean, confidence: Float) =
         meshManager.submitClassifyVote(sessionId, isGunshot, confidence)
 
+    override fun publishConfirmedResponse(trigger: ResponseTriggerEvent) =
+        meshManager.publishConfirmedResponseTrigger(
+            sessionId = trigger.sessionId,
+            confirmedByNodes = trigger.confirmedByNodes,
+            latitude = trigger.latitude,
+            longitude = trigger.longitude,
+            timestamp = trigger.timestamp
+        )
+
     override fun submitIncidentReport(report: IncidentReportEvent) =
         meshManager.publishIncidentReport(report)
 

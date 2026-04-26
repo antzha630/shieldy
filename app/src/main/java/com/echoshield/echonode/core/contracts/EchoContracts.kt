@@ -150,6 +150,7 @@ interface MeshGateway {
 
     fun broadcastWakeClassify(latitude: Double, longitude: Double)
     fun submitClassifyVote(sessionId: String, isGunshot: Boolean, confidence: Float)
+    fun publishConfirmedResponse(trigger: ResponseTriggerEvent)
     fun submitIncidentReport(report: IncidentReportEvent)
     fun disarmSentinel()
     fun setConfirmationThreshold(threshold: Int)

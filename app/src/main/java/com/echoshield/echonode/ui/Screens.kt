@@ -1319,9 +1319,9 @@ fun BarricadeScreen(
     onAutoDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    LaunchedEffect(Unit) {
+    LaunchedEffect(threatZone) {
         // Keep the splash brief, then move users to the main incident tabs.
-        delay(2500)
+        delay(4000)
         onAutoDismiss()
     }
 
