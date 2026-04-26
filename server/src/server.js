@@ -1,5 +1,6 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import { GoogleGenAI } from "@google/genai";
 
 const PORT = Number.parseInt(process.env.PORT || "8787", 10);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -19,12 +20,18 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const GEMINI_MODEL_FALLBACKS = [
   "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash",
   "gemini-2.0-flash-001",
-  "gemini-1.5-flash"
+  "gemini-2.0-flash-lite"
 ];
+const GEMINI_DEBUG = /^(1|true|yes|on)$/i.test(process.env.GEMINI_DEBUG || "");
+const GEMINI_MODEL_BACKOFF_MS = Number.parseInt(process.env.GEMINI_MODEL_BACKOFF_MS || "60000", 10);
 
 const incidents = new Map();
 const seenMessages = new Set();
+const geminiBackoffUntilByModel = new Map();
+const geminiClient = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 
 function nowIso() {
   return new Date().toISOString();
@@ -368,7 +375,7 @@ function addUnique(list, value) {
 
 function recommendationFor(incident) {
   if (incident.status === "CONFIRMED_RESPONSE") {
-    return "Dispatch law enforcement/EMS, push area guidance, continue receiving mesh observations.";
+    return "Recommend law enforcement/EMS dispatch, push area guidance, continue receiving mesh observations.";
   }
   if (incident.status === "EVACUATE") {
     return `Evacuation route active${incident.routes[0] ? `: ${incident.routes[0]}` : ""}.`;
@@ -498,6 +505,8 @@ function buildAgentContextPrompt(incident) {
     "Do not use markdown, bold text, headings, all-caps warnings, emojis, or dramatic labels like URGENT.",
     "Do not say \"shooter nearby\"; say confirmed threat alert or reported threat location instead.",
     "When the data only comes from gunshot detection, say confirmed threat alert or reported shot origin, not confirmed shooter.",
+    "Do not say police, law enforcement, EMS, or dispatchers have been dispatched unless dispatch notification data confirms it.",
+    "If dispatch is only recommended, say dispatch recommended.",
     "Prioritize immediate safety, practical next actions, and one focused follow-up question.",
     "If user asks for unknown info, say what is missing and ask one focused follow-up question.",
     "Never claim law enforcement is physically present unless data says so.",
@@ -616,10 +625,15 @@ function agentReplyLooksBad(reply, incident, userMessage) {
   const lower = text.toLowerCase();
   if (text.length < 40) return true;
   if (/[,:;]$/.test(text)) return true;
+  if (/^(here is|here's)\b/i.test(text)) return true;
   if (isPromptEchoResponse(text)) return true;
   if (/\burgent\b/.test(lower)) return true;
   if (/\b(shooter nearby|shooter is nearby|nearby shooter)\b/.test(lower)) return true;
   if (/\b(police|law enforcement)\b.{0,24}\b(on scene|arrived|here)\b/.test(lower)) {
+    return true;
+  }
+  if (!incident.dispatchNotifiedAt &&
+      /\b(police|law enforcement|ems|dispatchers?)\b.{0,40}\b(have|has|were|was|are|is)\s+been\s+dispatched\b/.test(lower)) {
     return true;
   }
   return false;
@@ -652,38 +666,46 @@ function orderedModelCandidates() {
 }
 
 async function generateWithModelFallback(requestBodyBuilder) {
+  if (!geminiClient) {
+    throw new Error("Gemini SDK client unavailable: missing GEMINI_API_KEY/GOOGLE_API_KEY");
+  }
+
   const candidates = orderedModelCandidates();
   let lastError = null;
 
   for (const model of candidates) {
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+    const backoffUntil = geminiBackoffUntilByModel.get(model) || 0;
+    if (backoffUntil > Date.now()) {
+      const err = new Error(`Gemini model ${model} is rate-limit backed off for ${Math.ceil((backoffUntil - Date.now()) / 1000)}s`);
+      err.status = 429;
+      err.model = model;
+      lastError = err;
+      continue;
+    }
+
     try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(requestBodyBuilder())
+      const requestBody = requestBodyBuilder();
+      logGeminiRequest(model, requestBody);
+      const payload = await geminiClient.models.generateContent({
+        model,
+        ...requestBody
       });
-
-      if (!response.ok) {
-        const text = await response.text().catch(() => "");
-        const err = new Error(`Gemini HTTP ${response.status} model=${model} ${text.slice(0, 180)}`.trim());
-        err.status = response.status;
-        err.model = model;
-        err.responsePreview = String(text || "").slice(0, 240);
-        if (response.status === 404) {
-          // Model name unavailable for this API key/project; try next candidate.
-          console.warn(`[relay] model unavailable, trying fallback: ${model}`);
-          lastError = err;
-          continue;
-        }
-        throw err;
-      }
-
-      const payload = await response.json();
+      logGeminiResponse(model, payload);
       return { model, payload };
     } catch (error) {
+      const status = geminiErrorStatus(error);
+      error.status = status || error.status;
+      error.model = model;
+      error.responsePreview = String(error?.message || "").slice(0, 240);
       lastError = error;
-      if (String(error?.message || "").includes("HTTP 404")) {
+      if (status === 404 || String(error?.message || "").includes("404")) {
+        // Model name unavailable for this API key/project; try next candidate.
+        console.warn(`[relay] model unavailable, trying fallback: ${model}`);
+        continue;
+      }
+      if (status === 429 || String(error?.message || "").includes("429")) {
+        geminiBackoffUntilByModel.set(model, Date.now() + GEMINI_MODEL_BACKOFF_MS);
+        console.warn(`[relay] model rate-limited, trying fallback: ${model}`);
         continue;
       }
       throw error;
@@ -691,6 +713,80 @@ async function generateWithModelFallback(requestBodyBuilder) {
   }
 
   throw lastError || new Error("No usable Gemini/Gemma model available");
+}
+
+function geminiErrorStatus(error) {
+  const direct = Number(error?.status || error?.code || error?.statusCode);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const match = String(error?.message || "").match(/\b(4\d\d|5\d\d)\b/);
+  return match ? Number.parseInt(match[1], 10) : 0;
+}
+
+function previewText(value, limit = 700) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, limit);
+}
+
+function firstContentText(payload) {
+  if (typeof payload?.text === "string") {
+    return payload.text.trim();
+  }
+  return payload?.candidates?.[0]?.content?.parts
+    ?.map((part) => part?.text || "")
+    .join("\n")
+    .trim() || "";
+}
+
+function firstFinishReason(payload) {
+  return payload?.candidates?.[0]?.finishReason || "";
+}
+
+function contentUnionText(value) {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map(contentUnionText).filter(Boolean).join("\n");
+  }
+  if (Array.isArray(value.parts)) {
+    return value.parts.map((part) => part?.text || "").filter(Boolean).join("\n");
+  }
+  return "";
+}
+
+function logGeminiRequest(model, body) {
+  const config = body?.config || {};
+  const systemText = contentUnionText(config.systemInstruction);
+  const userText = contentUnionText(body?.contents);
+  console.info([
+    "[relay] Gemini request",
+    `model=${model}`,
+    `mime=${config.responseMimeType || "text/plain"}`,
+    `schema=${config.responseJsonSchema ? "json_schema" : config.responseSchema ? "legacy_schema" : "none"}`,
+    `system=${systemText ? "yes" : "no"}`,
+    `promptChars=${userText.length}`
+  ].join(" "));
+
+  if (GEMINI_DEBUG) {
+    console.info(`[relay] Gemini request prompt-preview model=${model}: ${previewText(userText)}`);
+  }
+}
+
+function logGeminiResponse(model, payload) {
+  const candidate = payload?.candidates?.[0] || {};
+  const rawText = firstContentText(payload);
+  console.info([
+    "[relay] Gemini response",
+    `model=${model}`,
+    `finish=${candidate.finishReason || "unknown"}`,
+    `parts=${candidate.content?.parts?.length || 0}`,
+    `textChars=${rawText.length}`
+  ].join(" "));
+
+  if (GEMINI_DEBUG && rawText) {
+    console.info(`[relay] Gemini response raw-preview model=${model}: ${previewText(rawText)}`);
+  }
 }
 
 function classifyGeminiFailure(error, rawText = "", stage = "unknown") {
@@ -736,16 +832,14 @@ async function generateAgentReply(incident, userMessage) {
   let lastRawText = "";
   try {
     const buildRequest = () => ({
-        systemInstruction: {
-          parts: [{ text: systemPrompt }]
-        },
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-        generationConfig: {
+        config: {
+          systemInstruction: systemPrompt,
           temperature: 0.2,
           topP: 0.9,
-          maxOutputTokens: 180,
+          maxOutputTokens: 640,
           responseMimeType: "application/json",
-          responseSchema: AGENT_REPLY_RESPONSE_SCHEMA
+          responseJsonSchema: AGENT_REPLY_RESPONSE_SCHEMA
         }
       });
 
@@ -760,8 +854,9 @@ async function generateAgentReply(incident, userMessage) {
       throw new Error("Gemini returned empty text");
     }
 
+    const finishReason = firstFinishReason(payload);
     const cleanedText = parseAgentReplyResponse(text);
-    if (cleanedText && !agentReplyLooksBad(cleanedText, incident, userPrompt)) {
+    if (finishReason !== "MAX_TOKENS" && cleanedText && !agentReplyLooksBad(cleanedText, incident, userPrompt)) {
       console.info(`[relay] Agent reply model=${model}`);
       return cleanedText.slice(0, 1800);
     }
@@ -771,6 +866,7 @@ async function generateAgentReply(incident, userMessage) {
       "Return only JSON with a message field.",
       "The message must be plain text: no markdown, no bold, no bullets, no URGENT label.",
       "Use only the incident summary. Do not invent shooter proximity or official response.",
+      "Do not say police/EMS have been dispatched unless the summary explicitly says dispatch notification was sent.",
       "Give 2-4 short sentences for immediate safety and one missing-info question.",
       "",
       "INCIDENT SUMMARY:",
@@ -783,14 +879,14 @@ async function generateAgentReply(incident, userMessage) {
     ].join("\n");
 
     const retryResult = await generateWithModelFallback(() => ({
-      systemInstruction: { parts: [{ text: "You are a calm emergency assistant. Output only the requested JSON object." }] },
       contents: [{ role: "user", parts: [{ text: retryPrompt }] }],
-      generationConfig: {
+      config: {
+        systemInstruction: "You are a calm emergency assistant. Output only the requested JSON object.",
         temperature: 0.1,
         topP: 0.8,
-        maxOutputTokens: 160,
+        maxOutputTokens: 640,
         responseMimeType: "application/json",
-        responseSchema: AGENT_REPLY_RESPONSE_SCHEMA
+        responseJsonSchema: AGENT_REPLY_RESPONSE_SCHEMA
       }
     }));
 
@@ -799,14 +895,17 @@ async function generateAgentReply(incident, userMessage) {
       .join("\n")
       .trim();
     lastRawText = retryText || lastRawText;
+    const retryFinishReason = firstFinishReason(retryResult.payload);
     const retryCleaned = parseAgentReplyResponse(retryText);
-    if (retryCleaned && !agentReplyLooksBad(retryCleaned, incident, userPrompt)) {
+    if (retryFinishReason !== "MAX_TOKENS" && retryCleaned && !agentReplyLooksBad(retryCleaned, incident, userPrompt)) {
       console.info(`[relay] Agent reply model=${retryResult.model} retry=1`);
       return retryCleaned.slice(0, 1800);
     }
 
     // Last-ditch salvage: keep whatever user-facing lines remain after sanitization.
-    const salvaged = forceAssistantAnswerFallback(retryText || text, incident, userPrompt);
+    const salvaged = retryFinishReason === "MAX_TOKENS"
+      ? ""
+      : forceAssistantAnswerFallback(retryText || text, incident, userPrompt);
     if (salvaged) {
       console.info(`[relay] Agent reply model=${retryResult.model} retry=1 salvaged=1`);
       return salvaged;
@@ -835,6 +934,15 @@ function generateHeuristicLiveUpdates(incident) {
   // Always include operational baseline first.
   push(`Status: ${incident.status}.`);
   push(incident.recommendedAction);
+  if (incident.location) {
+    push(`Reported shot origin: ${incident.location.latitude.toFixed(5)}, ${incident.location.longitude.toFixed(5)}.`);
+  }
+  if (incident.confirmedByNodes.length || incident.devices.length) {
+    push(`Observed by ${incident.devices.length} device(s), confirmed by ${incident.confirmedByNodes.length} node(s).`);
+  }
+  if (incident.zones.length) {
+    push(`Threat zone: ${incident.zones.slice(0, 2).join(", ")}.`);
+  }
 
   // Rank user crowd reports by likely urgency/actionability.
   const rankedUserReports = incident.authorityMessages
@@ -860,9 +968,8 @@ function generateHeuristicLiveUpdates(incident) {
   if (incident.medicalBrief && incident.medicalBrief !== "No medical notes received yet.") {
     push(incident.medicalBrief);
   }
-  push(incident.policeBrief);
 
-  return sanitizeLiveUpdates(updates);
+  return sanitizeLiveUpdates(updates, incident);
 }
 
 function scoreLiveUpdateReport(message) {
@@ -899,13 +1006,38 @@ function isPromptLikeLiveUpdate(value) {
     "prioritized by urgency",
     "do not include markdown",
     "do not include",
+    "here is the json",
+    "json requested",
+    "requested:",
+    "```",
     "use only",
     "system_instruction",
     "generationconfig"
   ].some((marker) => text.includes(marker));
 }
 
-function sanitizeLiveUpdates(values) {
+function liveUpdateLooksBad(text, incident = null) {
+  const lower = String(text || "").toLowerCase();
+  if (!incident?.dispatchNotifiedAt &&
+      /\b(police|law enforcement|ems|dispatchers?)\b.{0,40}\b(dispatched|sent|notified|en route|responding)\b/.test(lower)) {
+    return true;
+  }
+  const incidentEvidence = [
+    ...listValue(incident?.routes),
+    ...listValue(incident?.zones),
+    ...(incident?.notes || []).map((note) => note.note),
+    ...(incident?.authorityMessages || []).map((message) => message.message),
+    ...(incident?.observations || []).map((obs) => obs.payload)
+  ].join(" ").toLowerCase();
+  if (/\b(exit|exits|route|routes)\b/.test(lower) &&
+      /\b(blocked|compromised|closed|unsafe|avoid)\b/.test(lower) &&
+      !/\b(exit|exits|route|routes|blocked|compromised|closed|unsafe)\b/.test(incidentEvidence)) {
+    return true;
+  }
+  return false;
+}
+
+function sanitizeLiveUpdates(values, incident = null) {
   const updates = [];
   const seen = new Set();
 
@@ -914,7 +1046,7 @@ function sanitizeLiveUpdates(values) {
       .replace(/^["'\s]+|["'\s]+$/g, "")
       .replace(/^[-*\d.)\s]+/, "")
       .trim();
-    if (!text || isPromptLikeLiveUpdate(text)) return;
+    if (!text || isPromptLikeLiveUpdate(text) || liveUpdateLooksBad(text, incident)) return;
 
     const key = text.toLowerCase();
     if (seen.has(key)) return;
@@ -982,6 +1114,11 @@ function parseLiveUpdatesFromPlainText(rawText) {
   return sanitizeLiveUpdates(lines);
 }
 
+function usableLiveUpdates(values, incident = null) {
+  const updates = sanitizeLiveUpdates(values, incident);
+  return updates.length >= 3 ? updates : [];
+}
+
 const LIVE_UPDATES_RESPONSE_SCHEMA = {
   type: "array",
   items: {
@@ -1000,6 +1137,7 @@ async function generateAgentLiveUpdates(incident) {
     "Output a JSON array of 3-6 emergency update strings for a live map feed.",
     "Each string: short, actionable, user-facing. No markdown, no explanation.",
     "Prioritize: injuries, shooter location, blocked exits, room-level info.",
+    "Do not invent blocked exits, compromised exits, evacuation routes, or official responder movement.",
     "Example output format: [\"Active threat north wing\", \"2 injured room 204\", \"East exit blocked\"]",
     "",
     "Incident:",
@@ -1010,25 +1148,21 @@ async function generateAgentLiveUpdates(incident) {
     snapshot.authorityMessages?.length ? `Reports: ${JSON.stringify(snapshot.authorityMessages.slice(-3))}` : ""
   ].filter(Boolean).join("\n");
 
-  const askModel = (userPrompt, maxOutputTokens = 200) => generateWithModelFallback(() => ({
-        systemInstruction: {
-          parts: [{
-            text: "Return ONLY a JSON array of strings. No other text, no explanation, no markdown."
-          }]
-        },
+  const askModel = (userPrompt, maxOutputTokens = 640) => generateWithModelFallback(() => ({
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-        generationConfig: {
+        config: {
+          systemInstruction: "Return ONLY a JSON array of strings. No other text, no explanation, no markdown. Do not invent official responder movement or blocked exits.",
           temperature: 0.1,
           topP: 0.8,
           maxOutputTokens,
           responseMimeType: "application/json",
-          responseSchema: LIVE_UPDATES_RESPONSE_SCHEMA
+          responseJsonSchema: LIVE_UPDATES_RESPONSE_SCHEMA
         }
       }));
 
   let lastRawText = "";
   try {
-    const { model, payload } = await askModel(prompt, 260);
+    const { model, payload } = await askModel(prompt, 640);
     const rawText = payload?.candidates?.[0]?.content?.parts
       ?.map((part) => part?.text || "")
       .join("\n")
@@ -1036,7 +1170,8 @@ async function generateAgentLiveUpdates(incident) {
     lastRawText = rawText;
 
     // Try to extract JSON array from response
-    const parsed = parseLiveUpdatesResponse(rawText);
+    const finishReason = firstFinishReason(payload);
+    const parsed = finishReason === "MAX_TOKENS" ? [] : usableLiveUpdates(parseLiveUpdatesResponse(rawText), incident);
     if (parsed.length) {
       console.info(`[relay] Live updates model=${model} count=${parsed.length}`);
       return parsed;
@@ -1053,20 +1188,23 @@ async function generateAgentLiveUpdates(incident) {
       JSON.stringify(snapshot)
     ].join("\n");
 
-    const retry = await askModel(retryPrompt, 180);
+    const retry = await askModel(retryPrompt, 640);
     const retryRawText = retry?.payload?.candidates?.[0]?.content?.parts
       ?.map((part) => part?.text || "")
       .join("\n")
       .trim();
     lastRawText = retryRawText || lastRawText;
-    const retryParsed = parseLiveUpdatesResponse(retryRawText);
+    const retryFinishReason = firstFinishReason(retry.payload);
+    const retryParsed = retryFinishReason === "MAX_TOKENS" ? [] : usableLiveUpdates(parseLiveUpdatesResponse(retryRawText), incident);
     if (retryParsed.length) {
       console.info(`[relay] Live updates model=${retry.model} retry=1 count=${retryParsed.length}`);
       return retryParsed;
     }
 
     // Last-ditch salvage from partial JSON fragments.
-    const salvaged = parseLiveUpdatesFromPartialJson(retryRawText || rawText);
+    const salvaged = retryFinishReason === "MAX_TOKENS"
+      ? []
+      : usableLiveUpdates(parseLiveUpdatesFromPartialJson(retryRawText || rawText), incident);
     if (salvaged.length) {
       console.info(`[relay] Live updates model=${retry.model} retry=1 salvaged=${salvaged.length}`);
       return salvaged;
@@ -1092,7 +1230,7 @@ async function generateAgentLiveUpdates(incident) {
 
 async function refreshIncidentLiveUpdates(incident) {
   const updates = await generateAgentLiveUpdates(incident);
-  incident.liveUpdates = sanitizeLiveUpdates(updates);
+  incident.liveUpdates = sanitizeLiveUpdates(updates, incident);
   incident.updatedAt = nowIso();
 }
 
@@ -1217,7 +1355,7 @@ async function sendSendGridEmail(incident, message) {
 }
 
 function publicIncident(incident) {
-  const storedLiveUpdates = sanitizeLiveUpdates(incident.liveUpdates || []);
+  const storedLiveUpdates = sanitizeLiveUpdates(incident.liveUpdates || [], incident);
   const effectiveLiveUpdates = storedLiveUpdates.length
     ? storedLiveUpdates
     : generateHeuristicLiveUpdates(incident);
