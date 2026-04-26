@@ -52,6 +52,8 @@ class MeshNetworkManager(context: Context) {
         private const val DUTY_REFRESH_MS = 15_000L
         private const val VOTE_WINDOW_MS = 5_000L
         private const val DEFAULT_CONFIRMATION_THRESHOLD = 2
+        private const val PREFS_NAME = "echoshield_mesh"
+        private const val PREF_LOCAL_NODE_ID = "local_node_id"
 
         const val PAYLOAD_ALERT_PREFIX = "ALERT:"
         const val PAYLOAD_THREAT_DETECTED = "ALERT:THREAT_DETECTED"
@@ -78,7 +80,7 @@ class MeshNetworkManager(context: Context) {
     private val connectionsClient: ConnectionsClient = Nearby.getConnectionsClient(appContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    private val localNodeId: String = UUID.randomUUID().toString().take(8)
+    private val localNodeId: String = loadOrCreateLocalNodeId()
     private val localEndpointName: String = "EchoNode-$localNodeId"
     private val dutyCoordinator = LeaderDutyCoordinator(localEndpointName)
     private val cloudRelayClient: CloudRelayClient =
@@ -110,10 +112,12 @@ class MeshNetworkManager(context: Context) {
     private val _responseTriggered = MutableSharedFlow<ResponseTrigger>(extraBufferCapacity = 8)
     val responseTriggered: SharedFlow<ResponseTrigger> = _responseTriggered.asSharedFlow()
 
-    private val _sentinelDutyActive = MutableStateFlow(true)
+    private val _sentinelDutyActive = MutableStateFlow(_dutyAssignment.value.audioSentinelDuty)
     val sentinelDutyActive: StateFlow<Boolean> = _sentinelDutyActive.asStateFlow()
 
     private val pendingVoteSessions = ConcurrentHashMap<String, VoteSession>()
+    private val orphanVotes = ConcurrentHashMap<String, ConcurrentHashMap<String, ClassifyVote>>()
+    private val orphanVoteTimestamps = ConcurrentHashMap<String, Long>()
     @Volatile
     private var confirmationThreshold = DEFAULT_CONFIRMATION_THRESHOLD
 
@@ -266,6 +270,18 @@ class MeshNetworkManager(context: Context) {
         }
     }
 
+    private fun loadOrCreateLocalNodeId(): String {
+        val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val existing = prefs.getString(PREF_LOCAL_NODE_ID, null)
+        if (!existing.isNullOrBlank()) {
+            return existing
+        }
+
+        val created = UUID.randomUUID().toString().take(8)
+        prefs.edit().putString(PREF_LOCAL_NODE_ID, created).apply()
+        return created
+    }
+
     fun startAdvertising() {
         if (isAdvertising) {
             Log.d(TAG, "Already advertising")
@@ -347,6 +363,8 @@ class MeshNetworkManager(context: Context) {
         stopDiscovery()
         disconnectAll()
         pendingVoteSessions.clear()
+        orphanVotes.clear()
+        orphanVoteTimestamps.clear()
     }
 
     fun stopAdvertising() {
@@ -425,15 +443,15 @@ class MeshNetworkManager(context: Context) {
     private fun handleIncomingPayload(sourceEndpointId: String, message: String) {
         when {
             message.startsWith(PAYLOAD_WAKE_CLASSIFY) -> {
-                handleWakeClassify(message)
+                handleWakeClassify(sourceEndpointId, message)
                 return
             }
             message.startsWith(PAYLOAD_CLASSIFY_VOTE) -> {
-                handleClassifyVote(message)
+                handleClassifyVote(sourceEndpointId, message)
                 return
             }
             message.startsWith(PAYLOAD_SENTINEL_DISARM) -> {
-                handleSentinelDisarm(message)
+                handleSentinelDisarm(sourceEndpointId, message)
                 return
             }
             message.startsWith(PAYLOAD_RESPONSE_TRIGGER) -> {
@@ -465,7 +483,11 @@ class MeshNetworkManager(context: Context) {
             .toList()
 
         if (targets.isEmpty()) {
-            Log.w(TAG, "No connected peers to broadcast to")
+            if (excludeEndpointId == null) {
+                Log.w(TAG, "No connected peers to broadcast to")
+            } else {
+                Log.d(TAG, "No downstream peers to relay payload")
+            }
             return
         }
 
@@ -600,15 +622,18 @@ class MeshNetworkManager(context: Context) {
         val previous = _dutyAssignment.value
         val next = dutyCoordinator.assign(peers)
         _dutyAssignment.value = next
+        _sentinelDutyActive.value = next.audioSentinelDuty
 
         if (previous.epoch != next.epoch ||
             previous.leaderNodeId != next.leaderNodeId ||
-            previous.memberNodeIds != next.memberNodeIds
+            previous.memberNodeIds != next.memberNodeIds ||
+            previous.audioSentinelDuty != next.audioSentinelDuty
         ) {
             Log.i(
                 TAG,
                 "Duty assignment epoch=${next.epoch} leader=${next.leaderNodeId} " +
-                    "localLeader=${next.isLocalLeader} members=${next.memberNodeIds.size}"
+                    "localLeader=${next.isLocalLeader} audioSentinel=${next.audioSentinelDuty} " +
+                    "members=${next.memberNodeIds.size}"
             )
         }
     }
@@ -813,23 +838,24 @@ class MeshNetworkManager(context: Context) {
 
     fun disarmSentinel() {
         dutyCoordinator.disarmSentinel()
-        _sentinelDutyActive.value = false
         updateDutyAssignment()
 
+        val messageId = createMessageId()
         val payload = buildString {
             append(PAYLOAD_SENTINEL_DISARM)
             append("|")
-            append(createMessageId())
+            append(messageId)
             append("|")
             append(localEndpointName)
         }
+        markMessageSeen("disarm:$messageId")
         sendPayloadToAllEndpoints(payload)
         Log.i(TAG, "Sentinel disarmed and handoff broadcast")
     }
 
     fun isSentinelDutyActive(): Boolean = _dutyAssignment.value.audioSentinelDuty
 
-    private fun handleWakeClassify(message: String) {
+    private fun handleWakeClassify(sourceEndpointId: String, message: String) {
         val parts = message.split("|")
         if (parts.size < 6) return
 
@@ -844,7 +870,7 @@ class MeshNetworkManager(context: Context) {
             return
         }
 
-        pendingVoteSessions.computeIfAbsent(sessionId) {
+        val session = pendingVoteSessions.computeIfAbsent(sessionId) {
             VoteSession(
                 sessionId = sessionId,
                 startedAtMs = System.currentTimeMillis(),
@@ -853,8 +879,9 @@ class MeshNetworkManager(context: Context) {
                 longitude = longitude
             )
         }
+        applyOrphanVotes(sessionId, session)
 
-        sendPayloadToAllEndpoints(message)
+        sendPayloadToAllEndpoints(message, excludeEndpointId = sourceEndpointId)
 
         val request = WakeClassifyRequest(
             sessionId = sessionId,
@@ -870,7 +897,7 @@ class MeshNetworkManager(context: Context) {
         Log.i(TAG, "Received WAKE_CLASSIFY session=$sessionId from $sourceNodeId")
     }
 
-    private fun handleClassifyVote(message: String) {
+    private fun handleClassifyVote(sourceEndpointId: String, message: String) {
         val parts = message.split("|")
         if (parts.size < 6) return
 
@@ -886,27 +913,29 @@ class MeshNetworkManager(context: Context) {
             return
         }
 
-        sendPayloadToAllEndpoints(message)
+        sendPayloadToAllEndpoints(message, excludeEndpointId = sourceEndpointId)
 
-        val session = pendingVoteSessions[sessionId]
-        if (session == null) {
-            Log.w(TAG, "Vote received for unknown session $sessionId")
-            return
-        }
-
-        session.votes[voterNodeId] = ClassifyVote(
+        val vote = ClassifyVote(
             nodeId = voterNodeId,
             isGunshot = isGunshot,
             confidence = confidence,
             timestamp = timestamp
         )
 
+        val session = pendingVoteSessions[sessionId]
+        if (session == null) {
+            storeOrphanVote(sessionId, vote)
+            return
+        }
+
+        session.votes[voterNodeId] = vote
+
         Log.d(TAG, "Vote recorded: session=$sessionId voter=$voterNodeId gunshot=$isGunshot (${session.confirmedCount()}/${confirmationThreshold} needed)")
 
         checkVoteThreshold(sessionId)
     }
 
-    private fun handleSentinelDisarm(message: String) {
+    private fun handleSentinelDisarm(sourceEndpointId: String, message: String) {
         val parts = message.split("|")
         if (parts.size < 3) return
 
@@ -915,11 +944,35 @@ class MeshNetworkManager(context: Context) {
 
         if (!markMessageSeen("disarm:$messageId")) return
 
-        sendPayloadToAllEndpoints(message)
+        sendPayloadToAllEndpoints(message, excludeEndpointId = sourceEndpointId)
         dutyCoordinator.forceSentinelHandoff()
         updateDutyAssignment()
         Log.i(TAG, "Sentinel disarm received from $sourceNode, forcing handoff")
     }
+
+    private fun storeOrphanVote(sessionId: String, vote: ClassifyVote) {
+        orphanVotes.computeIfAbsent(sessionId) { ConcurrentHashMap() }[vote.nodeId] = vote
+        orphanVoteTimestamps[orphanVoteKey(sessionId, vote.nodeId)] = System.currentTimeMillis()
+        Log.d(TAG, "Buffered vote for unknown session=$sessionId voter=${vote.nodeId}")
+    }
+
+    private fun applyOrphanVotes(sessionId: String, session: VoteSession) {
+        val votes = orphanVotes.remove(sessionId) ?: return
+        votes.values.forEach { vote ->
+            session.votes[vote.nodeId] = vote
+            orphanVoteTimestamps.remove(orphanVoteKey(sessionId, vote.nodeId))
+        }
+        Log.d(TAG, "Applied ${votes.size} buffered vote(s) for session=$sessionId")
+        checkVoteThreshold(sessionId)
+    }
+
+    private fun clearOrphanVotes(sessionId: String) {
+        orphanVotes.remove(sessionId)?.keys?.forEach { nodeId ->
+            orphanVoteTimestamps.remove(orphanVoteKey(sessionId, nodeId))
+        }
+    }
+
+    private fun orphanVoteKey(sessionId: String, nodeId: String): String = "$sessionId:$nodeId"
 
     private fun checkVoteThreshold(sessionId: String) {
         val session = pendingVoteSessions[sessionId] ?: return
@@ -944,9 +997,11 @@ class MeshNetworkManager(context: Context) {
                 _responseTriggered.emit(trigger)
             }
 
+            markMessageSeen("response:$sessionId")
             broadcastResponseTrigger(session)
             publishResponseTriggerToCloud(trigger, sourceEndpointId = null)
             pendingVoteSessions.remove(sessionId)
+            clearOrphanVotes(sessionId)
             Log.w(TAG, "RESPONSE TRIGGERED! session=$sessionId confirmedBy=$confirmedNodes")
         }
     }
@@ -987,7 +1042,7 @@ class MeshNetworkManager(context: Context) {
         val dedupeKey = "response:$sessionId"
         if (!markMessageSeen(dedupeKey)) return
 
-        sendPayloadToAllEndpoints(message)
+        sendPayloadToAllEndpoints(message, excludeEndpointId = sourceEndpointId)
 
         val trigger = ResponseTrigger(
             sessionId = sessionId,
@@ -1003,6 +1058,7 @@ class MeshNetworkManager(context: Context) {
 
         publishResponseTriggerToCloud(trigger, sourceEndpointId)
         pendingVoteSessions.remove(sessionId)
+        clearOrphanVotes(sessionId)
         Log.w(TAG, "RESPONSE_TRIGGER received: session=$sessionId at ($latitude, $longitude)")
     }
 
@@ -1080,8 +1136,23 @@ class MeshNetworkManager(context: Context) {
 
                 expiredSessions.forEach { sessionId ->
                     pendingVoteSessions.remove(sessionId)
+                    clearOrphanVotes(sessionId)
                     Log.d(TAG, "Expired vote session: $sessionId")
                 }
+
+                val orphanCutoff = now - VOTE_WINDOW_MS * 2
+                orphanVoteTimestamps.entries
+                    .filter { it.value < orphanCutoff }
+                    .forEach { entry ->
+                        orphanVoteTimestamps.remove(entry.key, entry.value)
+                        val sessionId = entry.key.substringBefore(":")
+                        val voterNodeId = entry.key.substringAfter(":")
+                        val votes = orphanVotes[sessionId] ?: return@forEach
+                        votes.remove(voterNodeId)
+                        if (votes.isEmpty()) {
+                            orphanVotes.remove(sessionId, votes)
+                        }
+                    }
             }
         }
     }

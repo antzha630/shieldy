@@ -33,7 +33,7 @@ class MeshGatewayImpl(context: Context) : MeshGateway {
     private val _responseTriggered = MutableSharedFlow<ResponseTriggerEvent>(extraBufferCapacity = 8)
     override val responseTriggered: SharedFlow<ResponseTriggerEvent> = _responseTriggered.asSharedFlow()
 
-    private val _sentinelDutyActive = MutableStateFlow(true)
+    private val _sentinelDutyActive = MutableStateFlow(meshManager.sentinelDutyActive.value)
     override val sentinelDutyActive: StateFlow<Boolean> = _sentinelDutyActive.asStateFlow()
 
     init {
