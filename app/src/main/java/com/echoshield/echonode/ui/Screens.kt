@@ -40,6 +40,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -57,6 +58,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -1123,25 +1125,34 @@ private fun IncidentChatTab(
                     Spacer(modifier = Modifier.height(10.dp))
                 }
 
-                OutlinedTextField(
-                    value = incidentNotes,
-                    onValueChange = onNotesChange,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(120.dp),
-                    placeholder = { Text("Type your message...", color = SecondaryText) },
-                    shape = RoundedCornerShape(12.dp)
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-                Button(
-                    onClick = onSend,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(50.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
-                    shape = RoundedCornerShape(12.dp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("Send", fontWeight = FontWeight.Bold)
+                    OutlinedTextField(
+                        value = incidentNotes,
+                        onValueChange = onNotesChange,
+                        modifier = Modifier
+                            .fillMaxWidth(0.84f)
+                            .height(56.dp),
+                        placeholder = { Text("Type your message...", color = SecondaryText) },
+                        shape = RoundedCornerShape(14.dp),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send)
+                    )
+                    IconButton(
+                        onClick = onSend,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .background(PrimaryBlue, RoundedCornerShape(24.dp))
+                    ) {
+                        Text(
+                            text = "➤",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
         }

@@ -726,11 +726,14 @@ async function sendSendGridEmail(incident, message) {
 }
 
 function publicIncident(incident) {
+  const effectiveLiveUpdates = Array.isArray(incident.liveUpdates) && incident.liveUpdates.length
+    ? incident.liveUpdates
+    : generateHeuristicLiveUpdates(incident);
   return {
     ...incident,
     observationCount: incident.observations.length,
     authorityMessageCount: incident.authorityMessages.length,
-    liveUpdates: incident.liveUpdates || [],
+    liveUpdates: effectiveLiveUpdates,
     observations: incident.observations.slice(-25),
     notes: incident.notes.slice(-25),
     authorityMessages: incident.authorityMessages.slice(-50)
@@ -1013,16 +1016,18 @@ function dispatchHtml(selectedIncidentId = null) {
     </a>
   `).join("");
 
-  const chatRows = selected?.authorityMessages.map((message) => `
+  const chatRows = selected?.authorityMessages.slice().reverse().map((message) => `
     <div class="message ${escapeHtml(message.role)}">
       <div class="meta">${escapeHtml(message.sender)} · ${escapeHtml(message.role)} · ${escapeHtml(message.at)}</div>
       <p>${escapeHtml(message.message)}</p>
     </div>
   `).join("") || "";
 
-  const notesRows = selected?.notes.slice(-6).map((note) => `
-    <li><strong>${escapeHtml(note.safetyStatus)}</strong> ${escapeHtml(note.roomNumber || "unknown room")} · injured ${note.injuredCount}: ${escapeHtml(note.note || "No note")}</li>
-  `).join("") || "";
+  const liveUpdateRows = (selected?.liveUpdates || [])
+    .slice()
+    .reverse()
+    .map((update) => `<li>${escapeHtml(update)}</li>`)
+    .join("");
 
   return `<!doctype html>
 <html lang="en">
@@ -1097,24 +1102,14 @@ function dispatchHtml(selectedIncidentId = null) {
     </section>
     <aside>
       <div class="panel">
-        <h2>Latest User Notes</h2>
-        <ul>${notesRows || '<li class="empty">No user notes yet.</li>'}</ul>
-      </div>
-      <div class="panel">
-        <h2>Demo Script</h2>
-        <ol>
-          <li>Trigger confirmed response from phones.</li>
-          <li>Show police/medical brief auto-generated here.</li>
-          <li>Type as dispatcher to simulate authority coordination.</li>
-          <li>Open mobile route guidance for N/E/S/W movement.</li>
-        </ol>
+        <h2>Live Updates</h2>
+        <ul>${liveUpdateRows || '<li class="empty">No live updates yet.</li>'}</ul>
       </div>
     </aside>
   </main>
   <script>
     const incidentId = ${JSON.stringify(selected?.id || null)};
-    const chat = document.getElementById("chat");
-    if (chat) chat.scrollTop = chat.scrollHeight;
+    let lastKnownUpdatedAt = ${JSON.stringify(selected?.updatedAt || "")};
 
     document.querySelectorAll("[data-template]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -1151,6 +1146,29 @@ function dispatchHtml(selectedIncidentId = null) {
         });
         window.location.reload();
       });
+    }
+
+    // Auto-refresh dispatch view when new server-side data arrives for this incident.
+    if (incidentId) {
+      window.setInterval(async () => {
+        try {
+          const response = await fetch("/v1/incidents/" + encodeURIComponent(incidentId), {
+            headers: { "cache-control": "no-store" }
+          });
+          if (!response.ok) return;
+          const payload = await response.json();
+          const updatedAt = payload?.incident?.updatedAt || "";
+          if (updatedAt && lastKnownUpdatedAt && updatedAt !== lastKnownUpdatedAt) {
+            window.location.reload();
+            return;
+          }
+          if (updatedAt) {
+            lastKnownUpdatedAt = updatedAt;
+          }
+        } catch (_) {
+          // Keep UI running even if one poll fails.
+        }
+      }, 2000);
     }
   </script>
 </body>
