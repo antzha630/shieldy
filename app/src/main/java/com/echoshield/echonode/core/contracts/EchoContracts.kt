@@ -116,6 +116,23 @@ data class ResponseTriggerEvent(
     val timestamp: Long
 )
 
+data class IncidentReportEvent(
+    val appState: AppState,
+    val safetyStatus: SafetyStatus,
+    val injuredCount: Int,
+    val companionsCount: Int,
+    val roomNumber: String,
+    val notes: String,
+    val latitude: Double,
+    val longitude: Double,
+    val locationLabel: String,
+    val relativeLocation: String,
+    val threatLatitude: Double?,
+    val threatLongitude: Double?,
+    val threatSessionId: String?,
+    val submittedAtMs: Long
+)
+
 interface MeshGateway {
     val incomingAlerts: SharedFlow<String>
     val connectedPeers: StateFlow<Int>
@@ -133,6 +150,7 @@ interface MeshGateway {
 
     fun broadcastWakeClassify(latitude: Double, longitude: Double)
     fun submitClassifyVote(sessionId: String, isGunshot: Boolean, confidence: Float)
+    fun submitIncidentReport(report: IncidentReportEvent)
     fun disarmSentinel()
     fun setConfirmationThreshold(threshold: Int)
     fun getConfirmationThreshold(): Int

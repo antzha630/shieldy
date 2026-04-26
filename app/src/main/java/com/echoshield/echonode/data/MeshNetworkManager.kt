@@ -2,12 +2,14 @@ package com.echoshield.echonode.data
 
 import android.content.Context
 import android.util.Log
+import com.echoshield.echonode.comms.CloudIncidentReport
 import com.echoshield.echonode.comms.CloudRelayClient
 import com.echoshield.echonode.comms.CloudRelayEnvelope
 import com.echoshield.echonode.comms.CloudRelayResult
 import com.echoshield.echonode.comms.DutyAssignment
 import com.echoshield.echonode.comms.LeaderDutyCoordinator
 import com.echoshield.echonode.comms.RetrofitCloudRelayClient
+import com.echoshield.echonode.core.contracts.IncidentReportEvent
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.nearby.Nearby
 import com.google.android.gms.nearby.connection.AdvertisingOptions
@@ -543,6 +545,56 @@ class MeshNetworkManager(context: Context) {
 
     fun getConnectedPeerIds(): List<String> {
         return connectedEndpoints.keys.toList()
+    }
+
+    fun publishIncidentReport(report: IncidentReportEvent) {
+        if (!cloudRelayClient.isEnabled) {
+            Log.d(TAG, "Incident report not sent; cloud relay disabled")
+            return
+        }
+
+        val assignment = _dutyAssignment.value
+        val messageId = "report:${createMessageId()}"
+        val cloudReport = CloudIncidentReport(
+            protocolVersion = 1,
+            deviceId = localEndpointName,
+            messageId = messageId,
+            observedAtMs = report.submittedAtMs,
+            connectedPeerCount = connectedEndpoints.size,
+            leaderNodeId = assignment.leaderNodeId,
+            dutyEpoch = assignment.epoch,
+            appState = report.appState.name,
+            safetyStatus = report.safetyStatus.name,
+            injuredCount = report.injuredCount,
+            companionsCount = report.companionsCount,
+            roomNumber = report.roomNumber,
+            note = report.notes,
+            latitude = report.latitude.takeIf { report.hasUserLocation() },
+            longitude = report.longitude.takeIf { report.hasUserLocation() },
+            locationLabel = report.locationLabel,
+            relativeLocation = report.relativeLocation,
+            threatLatitude = report.threatLatitude,
+            threatLongitude = report.threatLongitude,
+            sessionId = report.threatSessionId
+        )
+
+        scope.launch(Dispatchers.IO) {
+            when (val result = cloudRelayClient.publishIncidentReport(cloudReport)) {
+                CloudRelayResult.Delivered -> {
+                    Log.i(TAG, "Cloud incident report delivered $messageId")
+                }
+                CloudRelayResult.Disabled -> {
+                    Log.d(TAG, "Incident report skipped; cloud relay disabled")
+                }
+                is CloudRelayResult.Failed -> {
+                    Log.w(TAG, "Cloud incident report failed $messageId: ${result.reason}", result.throwable)
+                }
+            }
+        }
+    }
+
+    private fun IncidentReportEvent.hasUserLocation(): Boolean {
+        return latitude != 0.0 || longitude != 0.0
     }
 
     private fun publishLocalAlert(type: String, body: String? = null) {

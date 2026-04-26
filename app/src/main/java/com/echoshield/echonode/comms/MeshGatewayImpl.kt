@@ -1,6 +1,7 @@
 package com.echoshield.echonode.comms
 
 import android.content.Context
+import com.echoshield.echonode.core.contracts.IncidentReportEvent
 import com.echoshield.echonode.core.contracts.MeshGateway
 import com.echoshield.echonode.core.contracts.MeshStatus
 import com.echoshield.echonode.core.contracts.ResponseTriggerEvent
@@ -99,6 +100,9 @@ class MeshGatewayImpl(context: Context) : MeshGateway {
 
     override fun submitClassifyVote(sessionId: String, isGunshot: Boolean, confidence: Float) =
         meshManager.submitClassifyVote(sessionId, isGunshot, confidence)
+
+    override fun submitIncidentReport(report: IncidentReportEvent) =
+        meshManager.publishIncidentReport(report)
 
     override fun disarmSentinel() = meshManager.disarmSentinel()
 

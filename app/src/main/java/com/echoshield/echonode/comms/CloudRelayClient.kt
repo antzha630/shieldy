@@ -13,17 +13,23 @@ import retrofit2.http.POST
 import java.util.concurrent.TimeUnit
 
 private const val CLOUD_RELAY_ALERTS_PATH = "v1/mesh/alerts"
+private const val INCIDENT_REPORTS_PATH = "v1/incidents/reports"
 
 interface CloudRelayClient {
     val isEnabled: Boolean
 
     suspend fun publishAlert(envelope: CloudRelayEnvelope): CloudRelayResult
+    suspend fun publishIncidentReport(report: CloudIncidentReport): CloudRelayResult
 
     companion object {
         val Disabled: CloudRelayClient = object : CloudRelayClient {
             override val isEnabled: Boolean = false
 
             override suspend fun publishAlert(envelope: CloudRelayEnvelope): CloudRelayResult {
+                return CloudRelayResult.Disabled
+            }
+
+            override suspend fun publishIncidentReport(report: CloudIncidentReport): CloudRelayResult {
                 return CloudRelayResult.Disabled
             }
         }
@@ -46,6 +52,29 @@ data class CloudRelayEnvelope(
     val latitude: Double? = null,
     val longitude: Double? = null,
     val confirmedByNodes: List<String> = emptyList()
+)
+
+data class CloudIncidentReport(
+    val protocolVersion: Int,
+    val deviceId: String,
+    val messageId: String,
+    val observedAtMs: Long,
+    val connectedPeerCount: Int,
+    val leaderNodeId: String,
+    val dutyEpoch: Long,
+    val appState: String,
+    val safetyStatus: String,
+    val injuredCount: Int,
+    val companionsCount: Int,
+    val roomNumber: String,
+    val note: String,
+    val latitude: Double?,
+    val longitude: Double?,
+    val locationLabel: String,
+    val relativeLocation: String,
+    val threatLatitude: Double?,
+    val threatLongitude: Double?,
+    val sessionId: String?
 )
 
 sealed class CloudRelayResult {
@@ -119,6 +148,19 @@ class RetrofitCloudRelayClient private constructor(
         }
     }
 
+    override suspend fun publishIncidentReport(report: CloudIncidentReport): CloudRelayResult {
+        return runCatching {
+            val response = api.publishIncidentReport(report)
+            if (response.isSuccessful) {
+                CloudRelayResult.Delivered
+            } else {
+                CloudRelayResult.Failed("HTTP ${response.code()}")
+            }
+        }.getOrElse { error ->
+            CloudRelayResult.Failed("Incident report request failed", error)
+        }
+    }
+
     companion object {
         private const val TAG = "CloudRelayClient"
 
@@ -171,6 +213,9 @@ class RetrofitCloudRelayClient private constructor(
 internal interface CloudRelayApi {
     @POST(CLOUD_RELAY_ALERTS_PATH)
     suspend fun publishAlert(@Body request: CloudRelayAlertRequest): Response<Unit>
+
+    @POST(INCIDENT_REPORTS_PATH)
+    suspend fun publishIncidentReport(@Body request: CloudIncidentReport): Response<Unit>
 }
 
 internal data class CloudRelayAlertRequest(

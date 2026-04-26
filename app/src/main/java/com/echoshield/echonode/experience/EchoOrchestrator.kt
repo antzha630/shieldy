@@ -41,6 +41,7 @@ class EchoOrchestrator(
 
     private var lastThreatLatitude: Double = 0.0
     private var lastThreatLongitude: Double = 0.0
+    private var lastThreatSessionId: String? = null
 
     fun bind(scope: CoroutineScope) {
         boundScope = scope
@@ -126,6 +127,7 @@ class EchoOrchestrator(
     }
 
     private fun handleResponseTrigger(trigger: ResponseTriggerEvent) {
+        lastThreatSessionId = trigger.sessionId
         lastThreatLatitude = trigger.latitude
         lastThreatLongitude = trigger.longitude
 
@@ -355,6 +357,12 @@ class EchoOrchestrator(
 
     fun submitIncidentReport() {
         val snapshot = _uiState.value
+        val hasSnapshotThreat = snapshot.threatLatitude != 0.0 || snapshot.threatLongitude != 0.0
+        val hasLastThreat = lastThreatLatitude != 0.0 || lastThreatLongitude != 0.0
+        val sessionId = when {
+            snapshot.serverIncidentId.startsWith("session-") -> snapshot.serverIncidentId.removePrefix("session-")
+            else -> lastThreatSessionId
+        }
         val draft = IncidentReportDraft(
             appState = snapshot.appState,
             safetyStatus = snapshot.safetyStatus,
@@ -366,9 +374,11 @@ class EchoOrchestrator(
             longitude = snapshot.locationLongitude.takeIf { it != 0.0 },
             locationLabel = snapshot.locationLabel,
             relativeLocation = snapshot.relativeLocation,
-            threatLatitude = snapshot.threatLatitude.takeIf { it != 0.0 },
-            threatLongitude = snapshot.threatLongitude.takeIf { it != 0.0 },
-            sessionId = snapshot.serverIncidentId.removePrefix("session-").ifBlank { null },
+            threatLatitude = snapshot.threatLatitude.takeIf { hasSnapshotThreat }
+                ?: lastThreatLatitude.takeIf { hasLastThreat },
+            threatLongitude = snapshot.threatLongitude.takeIf { hasSnapshotThreat }
+                ?: lastThreatLongitude.takeIf { hasLastThreat },
+            sessionId = sessionId,
             connectedPeerCount = snapshot.connectedPeers
         )
         // Keep submit local/non-blocking for UI. This uploads the status packet to cloud.
