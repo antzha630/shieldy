@@ -63,6 +63,7 @@ import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.MapProperties
 import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.MarkerState
+import com.google.maps.android.compose.Circle
 import com.google.maps.android.compose.rememberCameraPositionState
 import com.echoshield.echonode.core.contracts.MeshStatus
 import com.echoshield.echonode.core.contracts.SafetyStatus
@@ -622,6 +623,10 @@ fun IncidentReportScreen(
     meshStatus: MeshStatus,
     threatZone: String,
     evacuationRoute: String,
+    threatLatitude: Double,
+    threatLongitude: Double,
+    threatRadiusMeters: Double,
+    serverRecommendedAction: String,
     companionsCount: Int,
     injuredCount: Int,
     roomNumber: String,
@@ -687,7 +692,11 @@ fun IncidentReportScreen(
                     connectedPeers = connectedPeers,
                     meshStatus = meshStatus,
                     threatZone = threatZone,
-                    evacuationRoute = evacuationRoute
+                    evacuationRoute = evacuationRoute,
+                    threatLatitude = threatLatitude,
+                    threatLongitude = threatLongitude,
+                    threatRadiusMeters = threatRadiusMeters,
+                    serverRecommendedAction = serverRecommendedAction
                 )
                 IncidentTab.CHAT -> IncidentChatTab(
                     meshStatus = meshStatus,
@@ -733,7 +742,11 @@ private fun IncidentMapTab(
     connectedPeers: Int,
     meshStatus: MeshStatus,
     threatZone: String,
-    evacuationRoute: String
+    evacuationRoute: String,
+    threatLatitude: Double,
+    threatLongitude: Double,
+    threatRadiusMeters: Double,
+    serverRecommendedAction: String
 ) {
     val scrollState = rememberScrollState()
 
@@ -766,6 +779,21 @@ private fun IncidentMapTab(
                         title = "Your Location",
                         snippet = relativeLocation.ifBlank { locationLabel }
                     )
+                    if (threatLatitude != 0.0 || threatLongitude != 0.0) {
+                        val threatPoint = LatLng(threatLatitude, threatLongitude)
+                        Marker(
+                            state = MarkerState(position = threatPoint),
+                            title = "Shooter / Threat Origin",
+                            snippet = "Estimated source from mesh confirmation"
+                        )
+                        Circle(
+                            center = threatPoint,
+                            radius = threatRadiusMeters,
+                            fillColor = AccentRed.copy(alpha = 0.20f),
+                            strokeColor = AccentRed.copy(alpha = 0.75f),
+                            strokeWidth = 3f
+                        )
+                    }
                 }
             } else {
                 Column(
@@ -800,6 +828,14 @@ private fun IncidentMapTab(
                     fontWeight = FontWeight.Bold,
                     color = if (evacuationRoute.isBlank()) SecondaryText else AccentGreen
                 )
+                if (serverRecommendedAction.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = serverRecommendedAction,
+                        fontSize = 13.sp,
+                        color = SecondaryText
+                    )
+                }
                 if (threatZone.isNotBlank()) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(

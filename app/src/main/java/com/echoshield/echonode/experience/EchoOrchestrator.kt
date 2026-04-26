@@ -1,7 +1,9 @@
 package com.echoshield.echonode.experience
 
 import com.echoshield.echonode.core.contracts.AppState
+import com.echoshield.echonode.core.contracts.CloudGateway
 import com.echoshield.echonode.core.contracts.EchoUiState
+import com.echoshield.echonode.core.contracts.IncidentReportDraft
 import com.echoshield.echonode.core.contracts.MeshGateway
 import com.echoshield.echonode.core.contracts.ResponseTriggerEvent
 import com.echoshield.echonode.core.contracts.SafetyStatus
@@ -21,6 +23,7 @@ import kotlin.math.sqrt
 class EchoOrchestrator(
     private val sensorGateway: SensorGateway,
     private val meshGateway: MeshGateway,
+    private val cloudGateway: CloudGateway = CloudGateway.Disabled,
     private val locationProvider: LocationProvider? = null
 ) {
     companion object {
@@ -33,11 +36,15 @@ class EchoOrchestrator(
 
     private val _uiState = MutableStateFlow(EchoUiState())
     val uiState: StateFlow<EchoUiState> = _uiState.asStateFlow()
+    private var boundScope: CoroutineScope? = null
 
     private var lastThreatLatitude: Double = 0.0
     private var lastThreatLongitude: Double = 0.0
 
     fun bind(scope: CoroutineScope) {
+        boundScope = scope
+        cloudGateway.startPolling(scope)
+
         scope.launch {
             sensorGateway.localTriggerEvents.collect {
                 transitionToBarricade()
@@ -78,6 +85,22 @@ class EchoOrchestrator(
         scope.launch {
             meshGateway.sentinelDutyActive.collect { _ ->
                 // Could update UI to show sentinel status if desired
+            }
+        }
+
+        scope.launch {
+            cloudGateway.latestIncident.collect { incident ->
+                if (incident == null) return@collect
+                _uiState.value = _uiState.value.copy(
+                    serverIncidentId = incident.incidentId,
+                    serverRecommendedAction = incident.recommendedAction,
+                    serverPoliceBrief = incident.policeBrief,
+                    serverMedicalBrief = incident.medicalBrief,
+                    threatLatitude = incident.threatLatitude ?: _uiState.value.threatLatitude,
+                    threatLongitude = incident.threatLongitude ?: _uiState.value.threatLongitude,
+                    // Scale radius by how many peers confirmed for easier map visualization.
+                    threatRadiusMeters = (50.0 + incident.confirmedByCount * 20.0).coerceAtMost(250.0)
+                )
             }
         }
 
@@ -135,7 +158,10 @@ class EchoOrchestrator(
             appState = AppState.BARRICADE,
             threatZone = threatZone,
             evacuationRoute = evacuationRoute,
-            relativeLocation = relativeMessage
+            relativeLocation = relativeMessage,
+            threatLatitude = trigger.latitude,
+            threatLongitude = trigger.longitude,
+            threatRadiusMeters = (50.0 + trigger.confirmedByNodes.size * 20.0).coerceAtMost(250.0)
         )
     }
 
@@ -315,9 +341,27 @@ class EchoOrchestrator(
     }
 
     fun submitIncidentReport() {
-        // Status/report submission should not create or rebroadcast a threat alert.
-        // The user is already in incident mode because a detection/trigger happened.
-        // Keep the current flow state unchanged.
+        val snapshot = _uiState.value
+        val draft = IncidentReportDraft(
+            appState = snapshot.appState,
+            safetyStatus = snapshot.safetyStatus,
+            injuredCount = snapshot.injuredCount,
+            companionsCount = snapshot.companionsCount,
+            roomNumber = snapshot.roomNumber,
+            note = snapshot.incidentNotes,
+            latitude = snapshot.locationLatitude.takeIf { it != 0.0 },
+            longitude = snapshot.locationLongitude.takeIf { it != 0.0 },
+            locationLabel = snapshot.locationLabel,
+            relativeLocation = snapshot.relativeLocation,
+            threatLatitude = snapshot.threatLatitude.takeIf { it != 0.0 },
+            threatLongitude = snapshot.threatLongitude.takeIf { it != 0.0 },
+            sessionId = snapshot.serverIncidentId.removePrefix("session-").ifBlank { null },
+            connectedPeerCount = snapshot.connectedPeers
+        )
+        // Keep submit local/non-blocking for UI. This uploads the status packet to cloud.
+        boundScope?.launch(kotlinx.coroutines.Dispatchers.IO) {
+            cloudGateway.submitIncidentReport(draft)
+        }
     }
 
     fun quickBarricade() {

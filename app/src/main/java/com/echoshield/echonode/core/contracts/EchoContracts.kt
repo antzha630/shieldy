@@ -2,6 +2,7 @@ package com.echoshield.echonode.core.contracts
 
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.CoroutineScope
 
 enum class AppState {
     LISTENING,
@@ -64,7 +65,14 @@ data class EchoUiState(
     val companionsCount: Int = 0,
     val injuredCount: Int = 0,
     val roomNumber: String = "",
-    val incidentNotes: String = ""
+    val incidentNotes: String = "",
+    val threatLatitude: Double = 0.0,
+    val threatLongitude: Double = 0.0,
+    val threatRadiusMeters: Double = 80.0,
+    val serverIncidentId: String = "",
+    val serverRecommendedAction: String = "",
+    val serverPoliceBrief: String = "",
+    val serverMedicalBrief: String = ""
 )
 
 interface SensorGateway {
@@ -110,4 +118,50 @@ interface MeshGateway {
     fun setConfirmationThreshold(threshold: Int)
     fun getConfirmationThreshold(): Int
     fun isSentinelDutyActive(): Boolean
+}
+
+data class IncidentReportDraft(
+    val appState: AppState,
+    val safetyStatus: SafetyStatus,
+    val injuredCount: Int,
+    val companionsCount: Int,
+    val roomNumber: String,
+    val note: String,
+    val latitude: Double?,
+    val longitude: Double?,
+    val locationLabel: String,
+    val relativeLocation: String,
+    val threatLatitude: Double?,
+    val threatLongitude: Double?,
+    val sessionId: String?,
+    val connectedPeerCount: Int
+)
+
+data class ServerIncidentUpdate(
+    val incidentId: String,
+    val status: String,
+    val recommendedAction: String,
+    val policeBrief: String,
+    val medicalBrief: String,
+    val threatLatitude: Double?,
+    val threatLongitude: Double?,
+    val confirmedByCount: Int,
+    val updatedAt: String
+)
+
+interface CloudGateway {
+    val isEnabled: Boolean
+    val latestIncident: StateFlow<ServerIncidentUpdate?>
+
+    fun startPolling(scope: CoroutineScope)
+    suspend fun submitIncidentReport(report: IncidentReportDraft): Boolean
+
+    companion object {
+        val Disabled: CloudGateway = object : CloudGateway {
+            override val isEnabled: Boolean = false
+            override val latestIncident: StateFlow<ServerIncidentUpdate?> = kotlinx.coroutines.flow.MutableStateFlow(null)
+            override fun startPolling(scope: CoroutineScope) = Unit
+            override suspend fun submitIncidentReport(report: IncidentReportDraft): Boolean = false
+        }
+    }
 }

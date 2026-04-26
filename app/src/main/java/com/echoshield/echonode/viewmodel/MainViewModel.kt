@@ -19,6 +19,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val orchestrator = EchoOrchestrator(
         sensorGateway = container.sensorGateway,
         meshGateway = container.meshGateway,
+        cloudGateway = container.cloudGateway,
         locationProvider = container.locationProvider
     )
 
@@ -47,7 +48,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val companionsCount: Int = 0,
         val injuredCount: Int = 0,
         val roomNumber: String = "",
-        val incidentNotes: String = ""
+        val incidentNotes: String = "",
+        val threatLatitude: Double = 0.0,
+        val threatLongitude: Double = 0.0,
+        val threatRadiusMeters: Double = 80.0,
+        val serverIncidentId: String = "",
+        val serverRecommendedAction: String = "",
+        val serverPoliceBrief: String = "",
+        val serverMedicalBrief: String = ""
     )
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
@@ -161,7 +169,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             companionsCount = source.companionsCount,
             injuredCount = source.injuredCount,
             roomNumber = source.roomNumber,
-            incidentNotes = source.incidentNotes
+            incidentNotes = source.incidentNotes,
+            threatLatitude = source.threatLatitude,
+            threatLongitude = source.threatLongitude,
+            threatRadiusMeters = source.threatRadiusMeters,
+            serverIncidentId = source.serverIncidentId,
+            serverRecommendedAction = source.serverRecommendedAction,
+            serverPoliceBrief = source.serverPoliceBrief,
+            serverMedicalBrief = source.serverMedicalBrief
         )
     }
 }
