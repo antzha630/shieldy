@@ -110,6 +110,7 @@ curl -X POST http://localhost:8787/v1/mesh/alerts \
 ## Endpoints
 
 - `POST /v1/mesh/alerts`: accepts important mobile relay packets.
+- `POST /v1/incidents/reports`: accepts phone UI safety/room/note/location reports and logs them to the terminal.
 - `GET /v1/incidents`: returns all tracked incidents.
 - `GET /v1/incidents/latest`: latest active incident.
 - `GET /v1/incidents/:id`: one incident.

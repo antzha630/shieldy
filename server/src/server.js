@@ -228,6 +228,92 @@ function upsertIncident(envelope) {
   return { incident, duplicate: isDuplicate };
 }
 
+function upsertIncidentReport(report) {
+  const observedAtMs = numberOrNull(report.observedAtMs) || Date.now();
+  const incident = incidentForReport(report, observedAtMs);
+  const messageKey = `report:${report.messageId}:${report.deviceId || "unknown"}`;
+  const isDuplicate = seenMessages.has(messageKey);
+
+  if (isDuplicate) {
+    return { incident, note: null, duplicate: true };
+  }
+
+  seenMessages.add(messageKey);
+  addUnique(incident.devices, report.deviceId);
+  addUnique(incident.leaders, report.leaderNodeId);
+
+  const userLatitude = numberOrNull(report.latitude);
+  const userLongitude = numberOrNull(report.longitude);
+  const threatLatitude = numberOrNull(report.threatLatitude);
+  const threatLongitude = numberOrNull(report.threatLongitude);
+
+  if (threatLatitude !== null && threatLongitude !== null) {
+    incident.location = { latitude: threatLatitude, longitude: threatLongitude };
+  } else if (!incident.location && userLatitude !== null && userLongitude !== null) {
+    incident.location = { latitude: userLatitude, longitude: userLongitude };
+  }
+
+  const note = {
+    id: crypto.randomUUID(),
+    receivedAt: nowIso(),
+    messageId: report.messageId,
+    deviceId: report.deviceId || null,
+    appState: report.appState || "UNKNOWN",
+    safetyStatus: report.safetyStatus || "UNKNOWN",
+    injuredCount: Number(report.injuredCount) || 0,
+    companionsCount: Number(report.companionsCount) || 0,
+    roomNumber: report.roomNumber || "",
+    note: report.note || "",
+    latitude: userLatitude,
+    longitude: userLongitude,
+    locationLabel: report.locationLabel || "",
+    relativeLocation: report.relativeLocation || "",
+    threatLatitude,
+    threatLongitude,
+    sessionId: report.sessionId || null,
+    connectedPeerCount: Number(report.connectedPeerCount) || 0
+  };
+
+  incident.notes.push(note);
+  incident.observations.push({
+    receivedAt: nowIso(),
+    messageId: report.messageId,
+    alertType: "INCIDENT:REPORT",
+    payload: report.note || "",
+    deviceId: report.deviceId || null,
+    sourceNodeId: report.deviceId || null,
+    connectedPeerCount: Number(report.connectedPeerCount) || 0,
+    leaderNodeId: report.leaderNodeId || null,
+    dutyEpoch: report.dutyEpoch || null
+  });
+
+  incident.lastObservedAtMs = Math.max(incident.lastObservedAtMs, observedAtMs);
+  incident.updatedAt = nowIso();
+  incident.recommendedAction = recommendationFor(incident);
+  incident.policeBrief = policeBriefFor(incident);
+  incident.medicalBrief = medicalBriefFor(incident);
+  incidents.set(incident.id, incident);
+
+  return { incident, note, duplicate: false };
+}
+
+function incidentForReport(report, observedAtMs) {
+  if (report.sessionId) {
+    const id = `session-${report.sessionId}`;
+    const incident = incidents.get(id) || createIncident(id, observedAtMs);
+    incidents.set(id, incident);
+    return incident;
+  }
+
+  const latest = latestActiveIncident();
+  if (latest) return latest;
+
+  const id = `report-${report.messageId || crypto.randomUUID()}`;
+  const incident = createIncident(id, observedAtMs);
+  incidents.set(id, incident);
+  return incident;
+}
+
 function applyStatus(incident, alertType) {
   if (alertType === "ALERT:ALL_CLEAR") {
     incident.status = "CLEARED";
@@ -466,6 +552,41 @@ function publicIncident(incident) {
   };
 }
 
+function logAlertReceipt(envelope, incident, duplicate) {
+  const lat = numberOrNull(envelope.latitude);
+  const lon = numberOrNull(envelope.longitude);
+  console.log([
+    duplicate ? "[relay] duplicate alert" : "[relay] alert",
+    `type=${envelope.alertType}`,
+    `incident=${incident.id}`,
+    `device=${envelope.deviceId || "unknown"}`,
+    `peers=${envelope.connectedPeerCount || 0}`,
+    lat !== null && lon !== null ? `shot=${lat.toFixed(6)},${lon.toFixed(6)}` : null,
+    envelope.sessionId ? `session=${envelope.sessionId}` : null
+  ].filter(Boolean).join(" "));
+}
+
+function logIncidentReport(report, incident, note, duplicate) {
+  const userLat = numberOrNull(report.latitude);
+  const userLon = numberOrNull(report.longitude);
+  const threatLat = numberOrNull(report.threatLatitude);
+  const threatLon = numberOrNull(report.threatLongitude);
+  console.log([
+    duplicate ? "[relay] duplicate report" : "[relay] report",
+    `incident=${incident.id}`,
+    `device=${report.deviceId || "unknown"}`,
+    `state=${report.appState || "UNKNOWN"}`,
+    `safety=${report.safetyStatus || "UNKNOWN"}`,
+    `injured=${Number(report.injuredCount) || 0}`,
+    `companions=${Number(report.companionsCount) || 0}`,
+    report.roomNumber ? `room=${JSON.stringify(report.roomNumber)}` : null,
+    userLat !== null && userLon !== null ? `user=${userLat.toFixed(6)},${userLon.toFixed(6)}` : null,
+    threatLat !== null && threatLon !== null ? `shot=${threatLat.toFixed(6)},${threatLon.toFixed(6)}` : null,
+    report.sessionId ? `session=${report.sessionId}` : null,
+    note?.note ? `note=${JSON.stringify(note.note)}` : null
+  ].filter(Boolean).join(" "));
+}
+
 async function handleAlert(req, res) {
   if (!authenticate(req)) {
     json(res, 401, { ok: false, error: "Unauthorized" });
@@ -486,6 +607,7 @@ async function handleAlert(req, res) {
   }
 
   const { incident, duplicate } = upsertIncident(envelope);
+  logAlertReceipt(envelope, incident, duplicate);
   json(res, duplicate ? 200 : 202, {
     ok: true,
     duplicate,
@@ -494,6 +616,39 @@ async function handleAlert(req, res) {
     dispatchRecommended: incident.dispatchRecommended,
     recommendedAction: incident.recommendedAction,
     policeBrief: incident.policeBrief
+  });
+}
+
+async function handleIncidentReport(req, res) {
+  if (!authenticate(req)) {
+    json(res, 401, { ok: false, error: "Unauthorized" });
+    return;
+  }
+
+  let report;
+  try {
+    report = await readJson(req);
+  } catch (error) {
+    json(res, 400, { ok: false, error: `Invalid JSON: ${error.message}` });
+    return;
+  }
+
+  if (!report || !report.messageId || !report.deviceId) {
+    json(res, 422, { ok: false, error: "Expected incident report with messageId and deviceId." });
+    return;
+  }
+
+  const { incident, note, duplicate } = upsertIncidentReport(report);
+  logIncidentReport(report, incident, note, duplicate);
+  json(res, duplicate ? 200 : 202, {
+    ok: true,
+    duplicate,
+    incidentId: incident.id,
+    noteId: note?.id || null,
+    status: incident.status,
+    policeBrief: incident.policeBrief,
+    medicalBrief: incident.medicalBrief,
+    recommendedAction: incident.recommendedAction
   });
 }
 
@@ -789,6 +944,11 @@ async function route(req, res) {
 
   if (req.method === "POST" && pathname === "/v1/mesh/alerts") {
     await handleAlert(req, res);
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/v1/incidents/reports") {
+    await handleIncidentReport(req, res);
     return;
   }
 
