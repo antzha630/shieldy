@@ -3,8 +3,10 @@ package com.echoshield.echonode.comms
 import android.content.Context
 import android.util.Log
 import com.echoshield.echonode.core.contracts.CloudGateway
+import com.echoshield.echonode.core.contracts.ConversationMessage
 import com.echoshield.echonode.core.contracts.IncidentReportDraft
 import com.echoshield.echonode.core.contracts.ServerIncidentUpdate
+import com.echoshield.echonode.core.contracts.ThreatZone
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -138,6 +140,22 @@ class RetrofitCloudGateway private constructor(
         }
     }
 
+    override suspend fun sendAuthorityMessage(incidentId: String, message: String): Boolean {
+        if (incidentId.isBlank() || message.isBlank()) return false
+        val request = AuthorityMessageRequest(
+            sender = localDeviceId,
+            role = "user",
+            message = message
+        )
+        return runCatching {
+            val response = api.sendAuthorityMessage(incidentId, request)
+            response.isSuccessful
+        }.getOrElse {
+            Log.w(TAG, "sendAuthorityMessage failed", it)
+            false
+        }
+    }
+
     private suspend fun fetchLatestIncident() {
         runCatching {
             val response = api.getLatestIncident()
@@ -158,6 +176,18 @@ class RetrofitCloudGateway private constructor(
                 medicalBrief = incident.medicalBrief.orEmpty(),
                 threatLatitude = incident.location?.latitude,
                 threatLongitude = incident.location?.longitude,
+                threatZones = buildThreatZones(incident),
+                authorityMessages = incident.authorityMessages.orEmpty().mapNotNull { msg ->
+                    val text = msg.message?.trim().orEmpty()
+                    if (text.isBlank()) return@mapNotNull null
+                    ConversationMessage(
+                        id = msg.id ?: "${incident.id}-${msg.at ?: System.currentTimeMillis()}-${msg.sender ?: "unknown"}",
+                        sender = msg.sender ?: "Dispatcher",
+                        role = msg.role ?: "authority",
+                        message = text,
+                        at = msg.at ?: incident.updatedAt.orEmpty()
+                    )
+                },
                 confirmedByCount = incident.confirmedByNodes?.size ?: 0,
                 updatedAt = incident.updatedAt.orEmpty()
             )
@@ -165,6 +195,60 @@ class RetrofitCloudGateway private constructor(
             Log.d(TAG, "fetchLatestIncident failed", it)
         }
     }
+
+    private fun buildThreatZones(incident: IncidentDto): List<ThreatZone> {
+        val zones = mutableListOf<ThreatZone>()
+
+        incident.observations.orEmpty()
+            .asReversed() // newest first
+            .forEachIndexed { idx, observation ->
+                val parsed = parseResponseTriggerPayload(observation.payload ?: return@forEachIndexed)
+                if (parsed != null) {
+                    val recencyScale = (1.0f - idx * 0.15f).coerceIn(0.35f, 1.0f)
+                    val confidence = (0.4f + parsed.confirmedByCount * 0.15f).coerceAtMost(1.0f) * recencyScale
+                    val radius = (60.0 + parsed.confirmedByCount * 20.0 + idx * 12.0).coerceAtMost(260.0)
+                    zones += ThreatZone(
+                        latitude = parsed.latitude,
+                        longitude = parsed.longitude,
+                        radiusMeters = radius,
+                        confidence = confidence,
+                        source = "response-trigger"
+                    )
+                }
+            }
+
+        // Fallback: if server has only a single incident location, still show one circle.
+        if (zones.isEmpty()) {
+            val lat = incident.location?.latitude
+            val lon = incident.location?.longitude
+            if (lat != null && lon != null) {
+                zones += ThreatZone(
+                    latitude = lat,
+                    longitude = lon,
+                    radiusMeters = 90.0,
+                    confidence = 0.55f,
+                    source = "incident-location"
+                )
+            }
+        }
+
+        return zones.take(5)
+    }
+
+    private fun parseResponseTriggerPayload(payload: String): ParsedTrigger? {
+        val parts = payload.split("|")
+        if (parts.size < 5 || parts[0] != "RESPONSE:TRIGGER") return null
+        val lat = parts[2].toDoubleOrNull() ?: return null
+        val lon = parts[3].toDoubleOrNull() ?: return null
+        val confirmedByCount = parts[4].split(",").count { it.isNotBlank() }
+        return ParsedTrigger(lat, lon, confirmedByCount)
+    }
+
+    private data class ParsedTrigger(
+        val latitude: Double,
+        val longitude: Double,
+        val confirmedByCount: Int
+    )
 }
 
 private interface CloudGatewayApi {
@@ -173,6 +257,12 @@ private interface CloudGatewayApi {
 
     @POST(REPORTS_PATH)
     suspend fun submitIncidentReport(@Body request: IncidentReportRequest): retrofit2.Response<Unit>
+
+    @POST("v1/incidents/{incidentId}/authority-messages")
+    suspend fun sendAuthorityMessage(
+        @retrofit2.http.Path("incidentId") incidentId: String,
+        @Body request: AuthorityMessageRequest
+    ): retrofit2.Response<Unit>
 }
 
 private data class IncidentReportRequest(
@@ -195,6 +285,12 @@ private data class IncidentReportRequest(
     val observedAtMs: Long
 )
 
+private data class AuthorityMessageRequest(
+    val sender: String,
+    val role: String,
+    val message: String
+)
+
 private data class LatestIncidentResponse(
     val ok: Boolean,
     val incident: IncidentDto?
@@ -208,10 +304,24 @@ private data class IncidentDto(
     val policeBrief: String?,
     val medicalBrief: String?,
     val location: LocationDto?,
-    val confirmedByNodes: List<String>?
+    val confirmedByNodes: List<String>?,
+    val observations: List<ObservationDto>?,
+    val authorityMessages: List<AuthorityMessageDto>?
 )
 
 private data class LocationDto(
     val latitude: Double?,
     val longitude: Double?
+)
+
+private data class ObservationDto(
+    val payload: String?
+)
+
+private data class AuthorityMessageDto(
+    val id: String?,
+    val sender: String?,
+    val role: String?,
+    val message: String?,
+    val at: String?
 )

@@ -23,6 +23,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -42,6 +45,7 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,14 +63,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.LatLngBounds
+import com.google.android.gms.maps.model.BitmapDescriptorFactory
+import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.MapProperties
 import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.MarkerState
 import com.google.maps.android.compose.Circle
+import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
 import com.echoshield.echonode.core.contracts.MeshStatus
 import com.echoshield.echonode.core.contracts.SafetyStatus
+import com.echoshield.echonode.core.contracts.ThreatZone
+import com.echoshield.echonode.core.contracts.ConversationMessage
 import com.echoshield.echonode.viewmodel.MainViewModel
 
 private val LightBackground = Color(0xFFFFFFFF)
@@ -626,7 +636,10 @@ fun IncidentReportScreen(
     threatLatitude: Double,
     threatLongitude: Double,
     threatRadiusMeters: Double,
+    threatZones: List<ThreatZone>,
     serverRecommendedAction: String,
+    liveUpdates: List<String>,
+    conversationMessages: List<ConversationMessage>,
     companionsCount: Int,
     injuredCount: Int,
     roomNumber: String,
@@ -696,11 +709,14 @@ fun IncidentReportScreen(
                     threatLatitude = threatLatitude,
                     threatLongitude = threatLongitude,
                     threatRadiusMeters = threatRadiusMeters,
-                    serverRecommendedAction = serverRecommendedAction
+                    threatZones = threatZones,
+                    serverRecommendedAction = serverRecommendedAction,
+                    liveUpdates = liveUpdates
                 )
                 IncidentTab.CHAT -> IncidentChatTab(
                     meshStatus = meshStatus,
                     incidentNotes = incidentNotes,
+                    conversationMessages = conversationMessages,
                     onNotesChange = onNotesChange,
                     onSend = onSendChat
                 )
@@ -717,12 +733,6 @@ fun IncidentReportScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
-
-        EmergencyQuickActions(
-            onQuickBarricade = onQuickBarricade,
-            onQuickEvacuate = onQuickEvacuate
-        )
     }
 }
 
@@ -746,107 +756,179 @@ private fun IncidentMapTab(
     threatLatitude: Double,
     threatLongitude: Double,
     threatRadiusMeters: Double,
-    serverRecommendedAction: String
+    threatZones: List<ThreatZone>,
+    serverRecommendedAction: String,
+    liveUpdates: List<String>
 ) {
     val scrollState = rememberScrollState()
+    val hasCoordinates = locationLatitude != 0.0 || locationLongitude != 0.0
+    val userPoint = if (hasCoordinates) LatLng(locationLatitude, locationLongitude) else null
+    val dynamicZones = threatZones.ifEmpty {
+        if (threatLatitude != 0.0 || threatLongitude != 0.0) {
+            listOf(ThreatZone(latitude = threatLatitude, longitude = threatLongitude,
+                radiusMeters = threatRadiusMeters, confidence = 0.7f, source = "fallback"))
+        } else emptyList()
+    }
+
+    val escapeTarget = userPoint?.let { computeEscapeTarget(it, dynamicZones) }
+    val isInsideThreat = userPoint != null && dynamicZones.any { zone ->
+        mapDistanceM(userPoint, LatLng(zone.latitude, zone.longitude)) <= zone.radiusMeters
+    }
+    val escapeLabel = if (userPoint != null && escapeTarget != null)
+        mapEscapeDirectionLabel(userPoint, escapeTarget) else null
 
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(scrollState),
+        modifier = Modifier.fillMaxSize().verticalScroll(scrollState),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // ── Map ──────────────────────────────────────────────────────────────
         Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(260.dp),
+            modifier = Modifier.fillMaxWidth().height(260.dp),
             colors = CardDefaults.cardColors(containerColor = CardWhite),
             shape = RoundedCornerShape(16.dp)
         ) {
-            val hasCoordinates = locationLatitude != 0.0 || locationLongitude != 0.0
-            if (hasCoordinates) {
-                val point = LatLng(locationLatitude, locationLongitude)
+            if (hasCoordinates && userPoint != null) {
                 val cameraState = rememberCameraPositionState {
-                    position = CameraPosition.fromLatLngZoom(point, INCIDENT_MAP_DEFAULT_ZOOM)
+                    position = CameraPosition.fromLatLngZoom(userPoint, INCIDENT_MAP_DEFAULT_ZOOM)
                 }
+                val zoneKey = dynamicZones.firstOrNull()
+                    ?.let { "${it.latitude},${it.longitude},${it.radiusMeters}" } ?: ""
+
+                // Re-center on user every time their position or the primary threat changes.
+                // Zoom out just enough to show the entire red threat circle.
+                LaunchedEffect(locationLatitude, locationLongitude, zoneKey) {
+                    val primaryZone = dynamicZones.firstOrNull()
+                    val zoom = if (primaryZone != null) {
+                        val dist = mapDistanceM(
+                            userPoint, LatLng(primaryZone.latitude, primaryZone.longitude))
+                        val maxM = (dist + primaryZone.radiusMeters).coerceAtLeast(50.0)
+                        mapZoomForDist(maxM, locationLatitude)
+                    } else INCIDENT_MAP_DEFAULT_ZOOM
+                    kotlin.runCatching {
+                        cameraState.animate(CameraUpdateFactory.newLatLngZoom(userPoint, zoom))
+                    }
+                }
+
                 GoogleMap(
                     modifier = Modifier.fillMaxSize(),
                     cameraPositionState = cameraState,
                     properties = MapProperties(isMyLocationEnabled = false)
                 ) {
+                    // Blue dot – your current position
                     Marker(
-                        state = MarkerState(position = point),
-                        title = "Your Location",
+                        state = MarkerState(position = userPoint),
+                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE),
+                        title = "You",
                         snippet = relativeLocation.ifBlank { locationLabel }
                     )
-                    if (threatLatitude != 0.0 || threatLongitude != 0.0) {
-                        val threatPoint = LatLng(threatLatitude, threatLongitude)
-                        Marker(
-                            state = MarkerState(position = threatPoint),
-                            title = "Shooter / Threat Origin",
-                            snippet = "Estimated source from mesh confirmation"
-                        )
+
+                    // Red threat circles with a red center dot for each zone
+                    dynamicZones.forEachIndexed { index, zone ->
+                        val threatPoint = LatLng(zone.latitude, zone.longitude)
+                        val alphaScale = (zone.confidence * (1f - index * 0.12f)).coerceIn(0.25f, 1f)
                         Circle(
                             center = threatPoint,
-                            radius = threatRadiusMeters,
-                            fillColor = AccentRed.copy(alpha = 0.20f),
-                            strokeColor = AccentRed.copy(alpha = 0.75f),
-                            strokeWidth = 3f
+                            radius = zone.radiusMeters,
+                            fillColor = AccentRed.copy(alpha = 0.18f * alphaScale),
+                            strokeColor = AccentRed.copy(alpha = 0.85f * alphaScale),
+                            strokeWidth = if (index == 0) 4f else 2f
                         )
+                        Marker(
+                            state = MarkerState(position = threatPoint),
+                            icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED),
+                            title = if (index == 0) "Active Threat" else "Earlier Threat",
+                            snippet = "Source: ${zone.source}"
+                        )
+                    }
+
+                    // Green directional arrow (shaft + V-shaped arrowhead)
+                    if (escapeTarget != null) {
+                        Polyline(
+                            points = listOf(userPoint, escapeTarget),
+                            color = AccentGreen,
+                            width = 14f
+                        )
+                        mapArrowHeadLines(userPoint, escapeTarget).forEach { wing ->
+                            Polyline(points = wing, color = AccentGreen, width = 14f)
+                        }
                     }
                 }
             } else {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(20.dp),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text("Map is active", color = DarkText, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = locationLabel.ifBlank { "Waiting for location update" },
-                        color = SecondaryText,
-                        textAlign = TextAlign.Center
-                    )
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Map is active", color = DarkText, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = locationLabel.ifBlank { "Waiting for location update" },
+                            color = SecondaryText,
+                            textAlign = TextAlign.Center
+                        )
+                    }
                 }
             }
         }
 
+        // ── Proximity-based action card ───────────────────────────────────────
         Card(
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = CardWhite),
+            colors = CardDefaults.cardColors(
+                containerColor = if (isInsideThreat) AccentRed.copy(alpha = 0.09f)
+                                 else Color(0xFFE8F7EF)
+            ),
             shape = RoundedCornerShape(14.dp)
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
-                SectionLabel("Route Guidance")
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = evacuationRoute.ifBlank { "Awaiting confirmed route" },
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (evacuationRoute.isBlank()) SecondaryText else AccentGreen
-                )
-                if (serverRecommendedAction.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = serverRecommendedAction,
-                        fontSize = 13.sp,
-                        color = SecondaryText
-                    )
+                when {
+                    isInsideThreat -> {
+                        SectionLabel("⚠ BARRICADE NOW")
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "You are inside the active threat zone. Lock doors, stay low, silence your device, and do not move.",
+                            fontSize = 13.sp,
+                            color = AccentRed
+                        )
+                    }
+                    escapeLabel != null -> {
+                        SectionLabel(escapeLabel)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = evacuationRoute.ifBlank {
+                                "Move away from the threat as quickly and calmly as possible." },
+                            fontSize = 13.sp,
+                            color = AccentGreen
+                        )
+                        if (serverRecommendedAction.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(text = serverRecommendedAction, fontSize = 12.sp, color = SecondaryText)
+                        }
+                    }
+                    else -> {
+                        SectionLabel("Route Guidance")
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = evacuationRoute.ifBlank { "Awaiting confirmed route" },
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (evacuationRoute.isBlank()) SecondaryText else AccentGreen
+                        )
+                        if (threatZone.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(text = threatZone, fontSize = 13.sp, color = SecondaryText)
+                        }
+                    }
                 }
-                if (threatZone.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(6.dp))
+                if (dynamicZones.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = threatZone,
-                        fontSize = 13.sp,
-                        color = SecondaryText
+                        text = "${dynamicZones.size} threat zone(s) tracked",
+                        fontSize = 11.sp,
+                        color = AccentRed.copy(alpha = 0.7f)
                     )
                 }
             }
         }
 
+        // ── Live updates from server authority messages ────────────────────────
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = CardWhite),
@@ -855,23 +937,112 @@ private fun IncidentMapTab(
             Column(modifier = Modifier.padding(14.dp)) {
                 SectionLabel("Live Updates")
                 Spacer(modifier = Modifier.height(8.dp))
-                // TODO: Replace these hardcoded notifications with dynamic alert feed data.
-                LiveUpdateRow("17:40 - Notification: Emergency services have been alerted.")
-                LiveUpdateRow("17:41 - Notification: Shelter in place while route verification runs.")
-                LiveUpdateRow("17:42 - Notification: Nearby devices syncing incident state.")
-                LiveUpdateRow("17:43 - Notification: Awaiting next guidance update.")
+                if (liveUpdates.isEmpty()) {
+                    LiveUpdateRow("Waiting for server updates...")
+                } else {
+                    liveUpdates.take(6).forEach { update ->
+                        LiveUpdateRow(update)
+                    }
+                }
             }
         }
     }
+}
+
+/** Haversine distance in metres between two LatLng points. */
+private fun mapDistanceM(a: LatLng, b: LatLng): Double {
+    val R = 6_371_000.0
+    val dLat = kotlin.math.sin(kotlin.math.PI / 180.0 * (b.latitude - a.latitude) / 2.0)
+    val dLon = kotlin.math.sin(kotlin.math.PI / 180.0 * (b.longitude - a.longitude) / 2.0)
+    val h = dLat * dLat + kotlin.math.cos(kotlin.math.PI / 180.0 * a.latitude) *
+            kotlin.math.cos(kotlin.math.PI / 180.0 * b.latitude) * dLon * dLon
+    return R * 2.0 * kotlin.math.atan2(kotlin.math.sqrt(h), kotlin.math.sqrt(1.0 - h))
+}
+
+/** Zoom level that fits [maxDistMeters] within roughly 400 px of map height. */
+private fun mapZoomForDist(maxDistMeters: Double, latDeg: Double): Float {
+    val cosLat = kotlin.math.cos(kotlin.math.PI / 180.0 * latDeg).coerceAtLeast(0.01)
+    val zoom = kotlin.math.log2(156_543.03 * cosLat * 400.0 / maxDistMeters) - 1.0
+    return zoom.coerceIn(10.0, 18.0).toFloat()
+}
+
+/** Cardinal/intercardinal compass label with directional emoji for the escape bearing. */
+private fun mapEscapeDirectionLabel(user: LatLng, target: LatLng): String {
+    val dLon = kotlin.math.PI / 180.0 * (target.longitude - user.longitude)
+    val lat1 = kotlin.math.PI / 180.0 * user.latitude
+    val lat2 = kotlin.math.PI / 180.0 * target.latitude
+    val y = kotlin.math.sin(dLon) * kotlin.math.cos(lat2)
+    val x = kotlin.math.cos(lat1) * kotlin.math.sin(lat2) -
+             kotlin.math.sin(lat1) * kotlin.math.cos(lat2) * kotlin.math.cos(dLon)
+    val bearing = (kotlin.math.atan2(y, x) * 180.0 / kotlin.math.PI + 360.0) % 360.0
+    return when {
+        bearing < 22.5 || bearing >= 337.5 -> "↑ RUN NORTH"
+        bearing < 67.5  -> "↗ RUN NORTHEAST"
+        bearing < 112.5 -> "→ RUN EAST"
+        bearing < 157.5 -> "↘ RUN SOUTHEAST"
+        bearing < 202.5 -> "↓ RUN SOUTH"
+        bearing < 247.5 -> "↙ RUN SOUTHWEST"
+        bearing < 292.5 -> "← RUN WEST"
+        else            -> "↖ RUN NORTHWEST"
+    }
+}
+
+/**
+ * Returns two polyline point-lists that form a V-shaped arrowhead at [to].
+ * Works in degree-space (headLen ≈ 33 m at mid-latitudes).
+ */
+private fun mapArrowHeadLines(from: LatLng, to: LatLng): List<List<LatLng>> {
+    val dLat = to.latitude - from.latitude
+    val dLon = to.longitude - from.longitude
+    val mag = kotlin.math.sqrt(dLat * dLat + dLon * dLon)
+    if (mag < 1e-10) return emptyList()
+    val uLat = -dLat / mag   // unit vector pointing back along the shaft
+    val uLon = -dLon / mag
+    val pLat = -uLon         // perpendicular unit vector
+    val pLon = uLat
+    val headLen = 0.00030    // ~33 m in degrees
+    val sideLen = headLen * 0.45
+    val left  = LatLng(to.latitude + uLat * headLen + pLat * sideLen,
+                       to.longitude + uLon * headLen + pLon * sideLen)
+    val right = LatLng(to.latitude + uLat * headLen - pLat * sideLen,
+                       to.longitude + uLon * headLen - pLon * sideLen)
+    return listOf(listOf(left, to), listOf(right, to))
+}
+
+private fun computeEscapeTarget(user: LatLng, zones: List<ThreatZone>): LatLng? {
+    if (zones.isEmpty()) return null
+    val threatLat = zones.map { it.latitude }.average()
+    val threatLon = zones.map { it.longitude }.average()
+    val vecLat = user.latitude - threatLat
+    val vecLon = user.longitude - threatLon
+    val mag = kotlin.math.sqrt(vecLat * vecLat + vecLon * vecLon)
+    if (mag == 0.0) return null
+    val normalizedLat = vecLat / mag
+    val normalizedLon = vecLon / mag
+    // ~180m projected guidance line away from threat center.
+    val distanceDeg = 180.0 / 111_000.0
+    return LatLng(
+        user.latitude + normalizedLat * distanceDeg,
+        user.longitude + normalizedLon * distanceDeg
+    )
 }
 
 @Composable
 private fun IncidentChatTab(
     meshStatus: MeshStatus,
     incidentNotes: String,
+    conversationMessages: List<ConversationMessage>,
     onNotesChange: (String) -> Unit,
     onSend: () -> Unit
 ) {
+    val chatItems = conversationMessages.takeLast(40)
+    val listState = rememberLazyListState()
+    LaunchedEffect(chatItems.size) {
+        if (chatItems.isNotEmpty()) {
+            listState.animateScrollToItem(chatItems.lastIndex)
+        }
+    }
+
     Column(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.SpaceBetween
@@ -898,6 +1069,60 @@ private fun IncidentChatTab(
             shape = RoundedCornerShape(14.dp)
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
+                if (chatItems.isEmpty()) {
+                    Text(
+                        text = "No messages yet. Send an update to start the conversation.",
+                        color = SecondaryText,
+                        fontSize = 13.sp
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(300.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        state = listState
+                    ) {
+                        items(chatItems, key = { it.id }) { msg ->
+                            val role = msg.role.lowercase()
+                            val isUser = role == "user"
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+                            ) {
+                                Column(
+                                    horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+                                ) {
+                                    Text(
+                                        text = if (isUser) "You" else msg.sender,
+                                        fontSize = 11.sp,
+                                        color = SecondaryText,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Card(
+                                        modifier = Modifier.fillMaxWidth(0.82f),
+                                        colors = CardDefaults.cardColors(
+                                            containerColor = if (isUser) PrimaryBlue else Color(0xFFF1F5FB)
+                                        ),
+                                        shape = RoundedCornerShape(14.dp)
+                                    ) {
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Text(
+                                                text = msg.message,
+                                                fontSize = 13.sp,
+                                                color = if (isUser) Color.White else DarkText
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+
                 OutlinedTextField(
                     value = incidentNotes,
                     onValueChange = onNotesChange,
@@ -916,7 +1141,7 @@ private fun IncidentChatTab(
                     colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
                     shape = RoundedCornerShape(12.dp)
                 ) {
-                    Text("Send Update", fontWeight = FontWeight.Bold)
+                    Text("Send", fontWeight = FontWeight.Bold)
                 }
             }
         }

@@ -69,10 +69,29 @@ data class EchoUiState(
     val threatLatitude: Double = 0.0,
     val threatLongitude: Double = 0.0,
     val threatRadiusMeters: Double = 80.0,
+    val threatZones: List<ThreatZone> = emptyList(),
     val serverIncidentId: String = "",
     val serverRecommendedAction: String = "",
     val serverPoliceBrief: String = "",
-    val serverMedicalBrief: String = ""
+    val serverMedicalBrief: String = "",
+    val liveUpdates: List<String> = emptyList(),
+    val conversationMessages: List<ConversationMessage> = emptyList()
+)
+
+data class ThreatZone(
+    val latitude: Double,
+    val longitude: Double,
+    val radiusMeters: Double,
+    val confidence: Float = 0.5f,
+    val source: String = "server"
+)
+
+data class ConversationMessage(
+    val id: String,
+    val sender: String,
+    val role: String,
+    val message: String,
+    val at: String
 )
 
 interface SensorGateway {
@@ -145,6 +164,8 @@ data class ServerIncidentUpdate(
     val medicalBrief: String,
     val threatLatitude: Double?,
     val threatLongitude: Double?,
+    val threatZones: List<ThreatZone>,
+    val authorityMessages: List<ConversationMessage>,
     val confirmedByCount: Int,
     val updatedAt: String
 )
@@ -155,6 +176,7 @@ interface CloudGateway {
 
     fun startPolling(scope: CoroutineScope)
     suspend fun submitIncidentReport(report: IncidentReportDraft): Boolean
+    suspend fun sendAuthorityMessage(incidentId: String, message: String): Boolean
 
     companion object {
         val Disabled: CloudGateway = object : CloudGateway {
@@ -162,6 +184,7 @@ interface CloudGateway {
             override val latestIncident: StateFlow<ServerIncidentUpdate?> = kotlinx.coroutines.flow.MutableStateFlow(null)
             override fun startPolling(scope: CoroutineScope) = Unit
             override suspend fun submitIncidentReport(report: IncidentReportDraft): Boolean = false
+            override suspend fun sendAuthorityMessage(incidentId: String, message: String): Boolean = false
         }
     }
 }

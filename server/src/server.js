@@ -15,6 +15,8 @@ const DISPATCH_SMS_TO = process.env.DISPATCH_SMS_TO || "";
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || "";
 const SENDGRID_FROM = process.env.SENDGRID_FROM || "";
 const DISPATCH_EMAIL_TO = process.env.DISPATCH_EMAIL_TO || "";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
 
 const incidents = new Map();
 const seenMessages = new Set();
@@ -421,6 +423,116 @@ function addAuthorityMessage(incident, input) {
   return message;
 }
 
+function generateHeuristicAuthorityReply(incident, userMessage) {
+  const message = String(userMessage || "").toLowerCase();
+  const roomHint = incident.notes.at(-1)?.roomNumber || "your current area";
+  const injuredCount = incident.notes.reduce((sum, note) => sum + (Number(note.injuredCount) || 0), 0);
+
+  if (message.includes("injured") || message.includes("bleeding") || message.includes("hurt")) {
+    return `EMS acknowledged. Keep pressure on wounds if safe, avoid moving critical injuries, and stay in ${roomHint}. Report any change in injured count.`;
+  }
+  if (message.includes("where") || message.includes("go") || message.includes("route") || message.includes("evacuate")) {
+    return `Route guidance update: ${incident.recommendedAction} If movement is unsafe, shelter in ${roomHint} until the next update.`;
+  }
+  if (message.includes("shooter") || message.includes("gun") || message.includes("shots")) {
+    return "Police acknowledges report. Maintain silence, lock doors if possible, and avoid line-of-sight with hallways/windows.";
+  }
+  if (message.includes("safe") || message.includes("clear")) {
+    return "Status received. Continue to hold position and submit updates every 30-60 seconds until all-clear is confirmed.";
+  }
+  return "Dispatch received your message. Keep sharing location/safety/injury updates; responders are using this feed for live coordination.";
+}
+
+function clearIncidentNotifications(incident) {
+  incident.authorityMessages = [];
+  incident.authoritySeededAt = null;
+  incident.notificationAttempts = [];
+  incident.dispatchNotifiedAt = null;
+  incident.updatedAt = nowIso();
+}
+
+function buildAgentContextPrompt(incident) {
+  const latestNotes = incident.notes.slice(-5).map((note) => ({
+    safetyStatus: note.safetyStatus,
+    injuredCount: note.injuredCount,
+    companionsCount: note.companionsCount,
+    roomNumber: note.roomNumber,
+    note: note.note
+  }));
+  const latestObservations = incident.observations.slice(-8).map((obs) => ({
+    type: obs.alertType,
+    payload: obs.payload,
+    peers: obs.connectedPeerCount,
+    at: obs.receivedAt
+  }));
+
+  return [
+    "You are EchoShield Responder, a concise emergency coordination assistant.",
+    "Use incident data below. Prioritize immediate safety and practical next actions.",
+    "Never claim law enforcement is physically present unless data says so.",
+    "Keep response <= 120 words. Bullet points are okay.",
+    "",
+    "INCIDENT DATA (JSON):",
+    JSON.stringify({
+      incidentId: incident.id,
+      status: incident.status,
+      recommendedAction: incident.recommendedAction,
+      policeBrief: incident.policeBrief,
+      medicalBrief: incident.medicalBrief,
+      location: incident.location,
+      confirmedByNodes: incident.confirmedByNodes,
+      notes: latestNotes,
+      observations: latestObservations
+    })
+  ].join("\n");
+}
+
+async function generateAgentReply(incident, userMessage) {
+  if (!GEMINI_API_KEY) {
+    return generateHeuristicAuthorityReply(incident, userMessage);
+  }
+
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+  const systemPrompt = buildAgentContextPrompt(incident);
+  const userPrompt = `USER MESSAGE:\n${String(userMessage || "").trim()}`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          { role: "user", parts: [{ text: systemPrompt }] },
+          { role: "user", parts: [{ text: userPrompt }] }
+        ],
+        generationConfig: {
+          temperature: 0.25,
+          topP: 0.9,
+          maxOutputTokens: 220
+        }
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Gemini HTTP ${response.status}`);
+    }
+
+    const payload = await response.json();
+    const text = payload?.candidates?.[0]?.content?.parts
+      ?.map((part) => part?.text || "")
+      .join("\n")
+      .trim();
+
+    if (!text) {
+      throw new Error("Gemini returned empty text");
+    }
+    return text.slice(0, 1800);
+  } catch (error) {
+    console.warn("[relay] Gemini reply failed, falling back to heuristic:", error.message);
+    return generateHeuristicAuthorityReply(incident, userMessage);
+  }
+}
+
 function dispatchMessageFor(incident) {
   return [
     "ECHOSHIELD AUTOMATED ALERT",
@@ -701,6 +813,11 @@ async function handleNote(req, res, incidentId) {
 }
 
 async function handleAuthorityMessage(req, res, incidentId) {
+  if (!authenticate(req)) {
+    json(res, 401, { ok: false, error: "Unauthorized" });
+    return;
+  }
+
   const incident = incidents.get(incidentId);
   if (!incident) {
     json(res, 404, { ok: false, error: "Incident not found" });
@@ -726,12 +843,42 @@ async function handleAuthorityMessage(req, res, incidentId) {
     return;
   }
 
+  // Demo two-way chat: when app sends a user message, auto-generate a responder-style reply.
+  if ((input.role || "").toLowerCase() === "user") {
+    const reply = await generateAgentReply(incident, input.message);
+    addAuthorityMessage(incident, {
+        sender: "EchoShield Responder",
+        role: "assistant",
+        message: reply
+    });
+  }
+
   incidents.set(incident.id, incident);
   json(res, 202, {
     ok: true,
     incidentId: incident.id,
     message,
     authorityMessages: incident.authorityMessages.slice(-50)
+  });
+}
+
+async function handleIncidentClearNotifications(req, res, incidentId) {
+  if (!authenticate(req)) {
+    json(res, 401, { ok: false, error: "Unauthorized" });
+    return;
+  }
+  const incident = incidents.get(incidentId);
+  if (!incident) {
+    json(res, 404, { ok: false, error: "Incident not found" });
+    return;
+  }
+  clearIncidentNotifications(incident);
+  incidents.set(incident.id, incident);
+  json(res, 200, {
+    ok: true,
+    incidentId: incident.id,
+    authorityMessageCount: incident.authorityMessages.length,
+    notificationAttempts: incident.notificationAttempts.length
   });
 }
 
@@ -745,6 +892,9 @@ function dashboardHtml() {
         <p><strong>Police:</strong> ${escapeHtml(incident.policeBrief)}</p>
         <p><strong>Medical:</strong> ${escapeHtml(incident.medicalBrief)}</p>
         <p><strong>Devices:</strong> ${incident.devices.length} | <strong>Observations:</strong> ${incident.observations.length}</p>
+        <form method="post" action="/v1/incidents/${encodeURIComponent(incident.id)}/clear-notifications">
+          <button type="submit">Clear Notifications</button>
+        </form>
       </article>
     `).join("\n");
 
@@ -760,6 +910,7 @@ function dashboardHtml() {
     main { max-width: 980px; margin: 0 auto; padding: 24px; }
     article { background: white; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin: 16px 0; }
     code { font-size: 0.8em; color: #555; }
+    button { border: 0; border-radius: 8px; background: #b42318; color: white; padding: 9px 12px; font-weight: 700; cursor: pointer; margin-top: 8px; }
   </style>
 </head>
 <body>
@@ -846,6 +997,9 @@ function dispatchHtml(selectedIncidentId = null) {
           <p class="brief"><strong>Police brief:</strong> ${escapeHtml(selected.policeBrief)}</p>
           <p class="brief"><strong>Medical:</strong> ${escapeHtml(selected.medicalBrief)}</p>
           <p class="brief"><strong>Action:</strong> ${escapeHtml(selected.recommendedAction)}</p>
+          <p>
+            <button type="button" id="clearNotificationsBtn">Clear Notifications for Incident</button>
+          </p>
         </div>
         <div class="chat" id="chat">
           ${chatRows || '<p class="empty">No authority messages yet.</p>'}
@@ -905,6 +1059,18 @@ function dispatchHtml(selectedIncidentId = null) {
             role: "authority",
             message
           })
+        });
+        window.location.reload();
+      });
+    }
+
+    const clearBtn = document.getElementById("clearNotificationsBtn");
+    if (clearBtn && incidentId) {
+      clearBtn.addEventListener("click", async () => {
+        const ok = window.confirm("Clear all notifications/messages for this incident?");
+        if (!ok) return;
+        await fetch("/v1/incidents/" + encodeURIComponent(incidentId) + "/clear-notifications", {
+          method: "POST"
         });
         window.location.reload();
       });
@@ -972,6 +1138,12 @@ async function route(req, res) {
   const authorityMessageMatch = pathname.match(/^\/v1\/incidents\/([^/]+)\/authority-messages$/);
   if (req.method === "POST" && authorityMessageMatch) {
     await handleAuthorityMessage(req, res, decodeURIComponent(authorityMessageMatch[1]));
+    return;
+  }
+
+  const clearNotificationsMatch = pathname.match(/^\/v1\/incidents\/([^/]+)\/clear-notifications$/);
+  if (req.method === "POST" && clearNotificationsMatch) {
+    await handleIncidentClearNotifications(req, res, decodeURIComponent(clearNotificationsMatch[1]));
     return;
   }
 

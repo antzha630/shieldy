@@ -8,6 +8,8 @@ import com.echoshield.echonode.core.contracts.AppState
 import com.echoshield.echonode.core.contracts.EchoUiState
 import com.echoshield.echonode.core.contracts.MeshStatus
 import com.echoshield.echonode.core.contracts.SafetyStatus
+import com.echoshield.echonode.core.contracts.ThreatZone
+import com.echoshield.echonode.core.contracts.ConversationMessage
 import com.echoshield.echonode.experience.EchoOrchestrator
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -52,10 +54,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val threatLatitude: Double = 0.0,
         val threatLongitude: Double = 0.0,
         val threatRadiusMeters: Double = 80.0,
+        val threatZones: List<ThreatZone> = emptyList(),
         val serverIncidentId: String = "",
         val serverRecommendedAction: String = "",
         val serverPoliceBrief: String = "",
-        val serverMedicalBrief: String = ""
+        val serverMedicalBrief: String = "",
+        val liveUpdates: List<String> = emptyList(),
+        val conversationMessages: List<ConversationMessage> = emptyList()
     )
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
@@ -127,6 +132,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         orchestrator.submitIncidentReport()
     }
 
+    fun sendChatMessage() {
+        orchestrator.sendChatMessage()
+    }
+
     fun quickBarricade() {
         orchestrator.quickBarricade()
     }
@@ -173,10 +182,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             threatLatitude = source.threatLatitude,
             threatLongitude = source.threatLongitude,
             threatRadiusMeters = source.threatRadiusMeters,
+            threatZones = source.threatZones,
             serverIncidentId = source.serverIncidentId,
             serverRecommendedAction = source.serverRecommendedAction,
             serverPoliceBrief = source.serverPoliceBrief,
-            serverMedicalBrief = source.serverMedicalBrief
+            serverMedicalBrief = source.serverMedicalBrief,
+            liveUpdates = source.liveUpdates,
+            conversationMessages = source.conversationMessages
         )
     }
 }

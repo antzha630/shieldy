@@ -8,6 +8,7 @@ import com.echoshield.echonode.core.contracts.MeshGateway
 import com.echoshield.echonode.core.contracts.ResponseTriggerEvent
 import com.echoshield.echonode.core.contracts.SafetyStatus
 import com.echoshield.echonode.core.contracts.SensorGateway
+import com.echoshield.echonode.core.contracts.ThreatZone
 import com.echoshield.echonode.sensor.LocationProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -98,6 +99,12 @@ class EchoOrchestrator(
                     serverMedicalBrief = incident.medicalBrief,
                     threatLatitude = incident.threatLatitude ?: _uiState.value.threatLatitude,
                     threatLongitude = incident.threatLongitude ?: _uiState.value.threatLongitude,
+                    threatZones = incident.threatZones,
+                    conversationMessages = incident.authorityMessages.takeLast(30),
+                    liveUpdates = incident.authorityMessages
+                        .takeLast(6)
+                        .reversed()
+                        .map { "${it.at} - ${it.sender}: ${it.message}" },
                     // Scale radius by how many peers confirmed for easier map visualization.
                     threatRadiusMeters = (50.0 + incident.confirmedByCount * 20.0).coerceAtMost(250.0)
                 )
@@ -161,6 +168,15 @@ class EchoOrchestrator(
             relativeLocation = relativeMessage,
             threatLatitude = trigger.latitude,
             threatLongitude = trigger.longitude,
+            threatZones = listOf(
+                ThreatZone(
+                    latitude = trigger.latitude,
+                    longitude = trigger.longitude,
+                    radiusMeters = (50.0 + trigger.confirmedByNodes.size * 20.0).coerceAtMost(250.0),
+                    confidence = 0.9f,
+                    source = "mesh-response"
+                )
+            ),
             threatRadiusMeters = (50.0 + trigger.confirmedByNodes.size * 20.0).coerceAtMost(250.0)
         )
     }
@@ -361,6 +377,21 @@ class EchoOrchestrator(
         // Keep submit local/non-blocking for UI. This uploads the status packet to cloud.
         boundScope?.launch(kotlinx.coroutines.Dispatchers.IO) {
             cloudGateway.submitIncidentReport(draft)
+        }
+    }
+
+    fun sendChatMessage() {
+        val text = _uiState.value.incidentNotes.trim()
+        if (text.isBlank()) return
+        val incidentId = _uiState.value.serverIncidentId
+        if (incidentId.isBlank()) return
+
+        _uiState.value = _uiState.value.copy(incidentNotes = "")
+        boundScope?.launch(kotlinx.coroutines.Dispatchers.IO) {
+            cloudGateway.sendAuthorityMessage(
+                incidentId = incidentId,
+                message = text
+            )
         }
     }
 
