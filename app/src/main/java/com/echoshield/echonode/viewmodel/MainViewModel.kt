@@ -46,6 +46,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val safetyStatus: SafetyStatus = SafetyStatus.UNKNOWN,
         val companionsCount: Int = 0,
         val injuredCount: Int = 0,
+        val roomNumber: String = "",
         val incidentNotes: String = ""
     )
     private val _uiState = MutableStateFlow(UiState())
@@ -110,6 +111,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         orchestrator.setIncidentNotes(notes)
     }
 
+    fun setRoomNumber(room: String) {
+        orchestrator.setRoomNumber(room)
+    }
+
     fun submitIncidentReport() {
         orchestrator.submitIncidentReport()
     }
@@ -160,6 +165,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             safetyStatus = source.safetyStatus,
             companionsCount = source.companionsCount,
             injuredCount = source.injuredCount,
+            roomNumber = source.roomNumber,
             incidentNotes = source.incidentNotes
         )
     }

@@ -106,6 +106,7 @@ class EchoOrchestrator(
             safetyStatus = SafetyStatus.UNKNOWN,
             companionsCount = 0,
             injuredCount = 0,
+            roomNumber = "",
             incidentNotes = ""
         )
         meshGateway.broadcastAllClear()
@@ -136,6 +137,10 @@ class EchoOrchestrator(
 
     fun setIncidentNotes(notes: String) {
         _uiState.value = _uiState.value.copy(incidentNotes = notes)
+    }
+
+    fun setRoomNumber(room: String) {
+        _uiState.value = _uiState.value.copy(roomNumber = room)
     }
 
     fun submitIncidentReport() {
@@ -186,6 +191,7 @@ class EchoOrchestrator(
             safetyStatus = SafetyStatus.UNKNOWN,
             companionsCount = 0,
             injuredCount = 0,
+            roomNumber = "",
             incidentNotes = ""
         )
     }

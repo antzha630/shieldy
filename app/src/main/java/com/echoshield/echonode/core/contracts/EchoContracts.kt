@@ -63,6 +63,7 @@ data class EchoUiState(
     val safetyStatus: SafetyStatus = SafetyStatus.UNKNOWN,
     val companionsCount: Int = 0,
     val injuredCount: Int = 0,
+    val roomNumber: String = "",
     val incidentNotes: String = ""
 )
 

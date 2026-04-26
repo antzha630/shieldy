@@ -37,6 +37,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -66,7 +68,7 @@ import com.echoshield.echonode.core.contracts.MeshStatus
 import com.echoshield.echonode.core.contracts.SafetyStatus
 import com.echoshield.echonode.viewmodel.MainViewModel
 
-private val LightBackground = Color(0xFFE9EDF5)
+private val LightBackground = Color(0xFFFFFFFF)
 private val CardWhite = Color.White
 private val PrimaryBlue = Color(0xFF2F6BDE)
 private val DarkText = Color(0xFF111111)
@@ -610,13 +612,22 @@ fun SafetyCheckScreen(
 @Composable
 fun IncidentReportScreen(
     locationLabel: String,
+    relativeLocation: String,
     locationTimestamp: String,
+    locationLatitude: Double,
+    locationLongitude: Double,
     safetyStatus: SafetyStatus,
+    connectedPeers: Int,
+    meshStatus: MeshStatus,
+    threatZone: String,
+    evacuationRoute: String,
     companionsCount: Int,
     injuredCount: Int,
+    roomNumber: String,
     incidentNotes: String,
     onCompanionsChange: (Int) -> Unit,
     onInjuredChange: (Int) -> Unit,
+    onRoomNumberChange: (String) -> Unit,
     onNotesChange: (String) -> Unit,
     onSubmit: () -> Unit,
     onBack: () -> Unit,
@@ -624,7 +635,7 @@ fun IncidentReportScreen(
     onQuickEvacuate: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val scrollState = rememberScrollState()
+    var selectedTab by remember { mutableStateOf(IncidentTab.MAP) }
 
     Column(
         modifier = modifier
@@ -633,7 +644,7 @@ fun IncidentReportScreen(
             .padding(20.dp)
     ) {
         FlowHeader(
-            title = "Notes",
+            title = "Incident Response",
             step = 3,
             totalSteps = 3,
             showBackArrow = true,
@@ -641,58 +652,306 @@ fun IncidentReportScreen(
             onCancel = onBack
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .verticalScroll(scrollState),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+        TabRow(
+            selectedTabIndex = selectedTab.ordinal,
+            containerColor = CardWhite,
+            contentColor = PrimaryBlue
         ) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = CardWhite),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    SectionLabel("Notes to send to authorities")
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "✨ Analyzing your note...",
-                        fontSize = 12.sp,
-                        color = SecondaryText
+            IncidentTab.entries.forEach { tab ->
+                Tab(
+                    selected = selectedTab == tab,
+                    onClick = { selectedTab = tab },
+                    text = {
+                        Text(
+                            tab.label,
+                            fontWeight = if (selectedTab == tab) FontWeight.Bold else FontWeight.Medium
+                        )
+                    }
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Box(modifier = Modifier.weight(1f)) {
+            when (selectedTab) {
+                IncidentTab.MAP -> IncidentMapTab(
+                    locationLabel = locationLabel,
+                    relativeLocation = relativeLocation,
+                    locationTimestamp = locationTimestamp,
+                    locationLatitude = locationLatitude,
+                    locationLongitude = locationLongitude,
+                    connectedPeers = connectedPeers,
+                    meshStatus = meshStatus,
+                    threatZone = threatZone,
+                    evacuationRoute = evacuationRoute
+                )
+                IncidentTab.CHAT -> IncidentChatTab(
+                    meshStatus = meshStatus,
+                    incidentNotes = incidentNotes,
+                    onNotesChange = onNotesChange,
+                    onSend = onSubmit
+                )
+                IncidentTab.STATUS -> IncidentStatusTab(
+                    companionsCount = companionsCount,
+                    injuredCount = injuredCount,
+                    roomNumber = roomNumber,
+                    safetyStatus = safetyStatus,
+                    onCompanionsChange = onCompanionsChange,
+                    onInjuredChange = onInjuredChange,
+                    onRoomNumberChange = onRoomNumberChange,
+                    onSubmit = onSubmit
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        EmergencyQuickActions(
+            onQuickBarricade = onQuickBarricade,
+            onQuickEvacuate = onQuickEvacuate
+        )
+    }
+}
+
+private enum class IncidentTab(val label: String) {
+    MAP("Map"),
+    CHAT("Chat"),
+    STATUS("Status")
+}
+
+@Composable
+private fun IncidentMapTab(
+    locationLabel: String,
+    relativeLocation: String,
+    locationTimestamp: String,
+    locationLatitude: Double,
+    locationLongitude: Double,
+    connectedPeers: Int,
+    meshStatus: MeshStatus,
+    threatZone: String,
+    evacuationRoute: String
+) {
+    val scrollState = rememberScrollState()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(scrollState),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(260.dp),
+            colors = CardDefaults.cardColors(containerColor = CardWhite),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            val hasCoordinates = locationLatitude != 0.0 || locationLongitude != 0.0
+            if (hasCoordinates) {
+                val point = LatLng(locationLatitude, locationLongitude)
+                val cameraState = rememberCameraPositionState {
+                    position = CameraPosition.fromLatLngZoom(point, 17f)
+                }
+                GoogleMap(
+                    modifier = Modifier.fillMaxSize(),
+                    cameraPositionState = cameraState,
+                    properties = MapProperties(isMyLocationEnabled = false)
+                ) {
+                    Marker(
+                        state = MarkerState(position = point),
+                        title = "Your Location",
+                        snippet = relativeLocation.ifBlank { locationLabel }
                     )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedTextField(
-                        value = incidentNotes,
-                        onValueChange = onNotesChange,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(140.dp),
-                        placeholder = { Text("Type or speak what happened", color = SecondaryText) },
-                        shape = RoundedCornerShape(12.dp)
+                }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(20.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("Map is active", color = DarkText, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = locationLabel.ifBlank { "Waiting for location update" },
+                        color = SecondaryText,
+                        textAlign = TextAlign.Center
                     )
                 }
             }
-
-            Button(
-                onClick = onSubmit,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Text("Send to Authorities", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            }
-
-            EmergencyQuickActions(
-                onQuickBarricade = onQuickBarricade,
-                onQuickEvacuate = onQuickEvacuate
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
         }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = CardWhite),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                SectionLabel("Live Updates")
+                Spacer(modifier = Modifier.height(8.dp))
+                LiveUpdateRow("Location: ${locationLabel.ifBlank { "Unknown" }}")
+                LiveUpdateRow("Area: ${relativeLocation.ifBlank { "Unknown" }}")
+                LiveUpdateRow("Mesh: ${meshStatus.name.lowercase()} ($connectedPeers peers)")
+                if (threatZone.isNotBlank()) {
+                    LiveUpdateRow("Threat Zone: $threatZone")
+                }
+                if (evacuationRoute.isNotBlank()) {
+                    LiveUpdateRow("Evacuation: $evacuationRoute")
+                }
+                if (locationTimestamp.isNotBlank()) {
+                    LiveUpdateRow("Updated: $locationTimestamp")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun IncidentChatTab(
+    meshStatus: MeshStatus,
+    incidentNotes: String,
+    onNotesChange: (String) -> Unit,
+    onSend: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = CardWhite),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text("Emergency Agent", fontWeight = FontWeight.Bold, color = DarkText, fontSize = 20.sp)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = if (meshStatus == MeshStatus.CONNECTED) "Active" else "Connecting",
+                    color = SecondaryText,
+                    fontSize = 13.sp
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "Emergency response agent connected. Share updates for responders.",
+                    color = DarkText
+                )
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = CardWhite),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                OutlinedTextField(
+                    value = incidentNotes,
+                    onValueChange = onNotesChange,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(120.dp),
+                    placeholder = { Text("Type your message...", color = SecondaryText) },
+                    shape = RoundedCornerShape(12.dp)
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Button(
+                    onClick = onSend,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("Send Update", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun IncidentStatusTab(
+    companionsCount: Int,
+    injuredCount: Int,
+    roomNumber: String,
+    safetyStatus: SafetyStatus,
+    onCompanionsChange: (Int) -> Unit,
+    onInjuredChange: (Int) -> Unit,
+    onRoomNumberChange: (String) -> Unit,
+    onSubmit: () -> Unit
+) {
+    val scrollState = rememberScrollState()
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(scrollState),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = CardWhite),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                SectionLabel("Status Report")
+                Spacer(modifier = Modifier.height(8.dp))
+                StatusBadge(safetyStatus)
+                Spacer(modifier = Modifier.height(12.dp))
+                CounterRow(
+                    label = "Number of People",
+                    value = companionsCount,
+                    onChange = onCompanionsChange
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                CounterRow(
+                    label = "Number Injured",
+                    value = injuredCount,
+                    onChange = onInjuredChange
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = roomNumber,
+                    onValueChange = onRoomNumberChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    placeholder = { Text("Room Number", color = SecondaryText) },
+                    shape = RoundedCornerShape(12.dp)
+                )
+            }
+        }
+
+        Button(
+            onClick = onSubmit,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Text("Send Status Report", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
+    }
+}
+
+@Composable
+private fun LiveUpdateRow(text: String) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFF5F7FB)),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            color = DarkText,
+            fontSize = 13.sp
+        )
     }
 }
 
