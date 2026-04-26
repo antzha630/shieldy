@@ -9,7 +9,9 @@ import kotlinx.coroutines.flow.asStateFlow
 
 object SystemEventFlow {
     
-    private const val DEFAULT_THRESHOLD = 450.0
+    // Lowered from 450 to 200 for better gunshot detection sensitivity
+    // Gunshots from phone speakers often don't produce very high RMS values
+    private const val DEFAULT_THRESHOLD = 200.0
 
     const val EVENT_LOCAL_TRIGGER = "LOCAL_TRIGGER"
     const val EVENT_NETWORK_TRIGGER = "NETWORK_TRIGGER"

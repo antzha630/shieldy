@@ -56,15 +56,23 @@ class AudioSensorService : Service() {
         // still filtering out brief noise. Original was 0.15 which over-dampened spikes.
         private const val EMA_ALPHA = 0.4
         
-        // Gate threshold is read from SystemEventFlow.detectionThreshold (default 450).
+        // Gate threshold is read from SystemEventFlow.detectionThreshold (default 200).
         // Tune higher to reduce false gate opens from speech/ambient noise.
         // Typical quiet room ~50-100 RMS, speech ~200-500, clap/loud ~800+.
+        
+        // PEAK detection: Gunshots are impulsive sounds with high peak-to-RMS ratio.
+        // Use peak amplitude (max sample) as alternative gate trigger.
+        // Normalized peaks > 0.3 (~9800 raw) often indicate impulsive transients.
+        private const val PEAK_THRESHOLD_NORMALIZED = 0.25f
+        
+        // If peak/RMS ratio is high, the sound is likely impulsive (like a gunshot)
+        private const val IMPULSIVE_PEAK_RMS_RATIO = 3.0f
 
         // TIER 2: ML confirmation
         // Gunshot confidence threshold. YAMNet typically outputs 0.0-1.0 for each class.
-        // 0.15 is sensitive for real gunshot detection; was 0.2 originally, worked well.
-        // Increase to 0.25-0.35 if getting false positives from other loud sounds.
-        private const val GUNSHOT_CONFIDENCE_THRESHOLD = 0.15f
+        // 0.10 is more sensitive - lowered from 0.15 since we need more positives.
+        // Increase to 0.20-0.35 if getting too many false positives.
+        private const val GUNSHOT_CONFIDENCE_THRESHOLD = 0.10f
         
         // Minimum consecutive high-confidence frames before trigger.
         // Prevents single-frame noise spikes from triggering.
@@ -472,6 +480,8 @@ class AudioSensorService : Service() {
                 }
 
                 val instantRms = calculateRMS(buffer, readResult)
+                val peakAmplitude = calculateMaxAmplitude(buffer, readResult)
+                val peakNormalized = peakAmplitude / 32768f
                 
                 // TIER 1: Apply EMA smoothing for stable gate decisions
                 smoothedAmplitude = EMA_ALPHA * instantRms + (1 - EMA_ALPHA) * smoothedAmplitude
@@ -512,18 +522,30 @@ class AudioSensorService : Service() {
                     lastAmplitudeUpdate = currentTime
                 }
 
-                // TIER 1: Activity gate check
-                // Use RAW amplitude for gate (not smoothed) - gunshots are impulsive spikes
-                // that get dampened by EMA. Gate opens on ANY loud sound, ML filters false positives.
+                // TIER 1: Activity gate check - multiple criteria for sensitivity
+                // 1. RMS threshold: catches sustained loud sounds
+                // 2. Peak threshold: catches impulsive transients (gunshots have high peaks)
+                // 3. Impulsive ratio: high peak-to-RMS ratio indicates transient sounds
                 val gateThreshold = SystemEventFlow.detectionThreshold.value
-                val gateOpen = instantRms >= gateThreshold && rollingBufferFilled
+                val rmsGateOpen = instantRms >= gateThreshold
+                val peakGateOpen = peakNormalized >= PEAK_THRESHOLD_NORMALIZED
+                val impulsiveSound = instantRms > 50 && (peakAmplitude / instantRms) > IMPULSIVE_PEAK_RMS_RATIO
+                
+                // Open gate if ANY of the criteria are met (more sensitive)
+                val gateOpen = (rmsGateOpen || peakGateOpen || impulsiveSound) && rollingBufferFilled
                 
                 // Update gate state telemetry if changed
                 if (gateOpen != currentGateOpen) {
                     currentGateOpen = gateOpen
                     SystemEventFlow.updateGateOpen(gateOpen)
                     if (gateOpen) {
-                        Log.d(TAG, "Activity gate OPENED (rms=${String.format("%.1f", instantRms)} >= $gateThreshold)")
+                        val reason = when {
+                            rmsGateOpen -> "RMS"
+                            peakGateOpen -> "PEAK"
+                            impulsiveSound -> "IMPULSIVE"
+                            else -> "?"
+                        }
+                        Log.d(TAG, "Activity gate OPENED [$reason] rms=${String.format("%.1f", instantRms)} peak=${"%.3f".format(peakNormalized)} thresh=$gateThreshold")
                     } else {
                         Log.d(TAG, "Activity gate CLOSED")
                         consecutiveHighConfidence = 0
@@ -540,14 +562,21 @@ class AudioSensorService : Service() {
                     val result = gunshotClassifier.classify(modelInput)
                     
                     if (result != null) {
+                        // Log every inference for debugging detection issues
+                        val isAboveThreshold = result.gunshotConfidence >= GUNSHOT_CONFIDENCE_THRESHOLD
+                        Log.d(TAG, "ML: gunshot=${"%.3f".format(result.gunshotConfidence)} " +
+                            "(thresh=$GUNSHOT_CONFIDENCE_THRESHOLD, above=$isAboveThreshold) " +
+                            "top=${result.topLabel}@${"%.3f".format(result.topScore)}")
+                        
                         SystemEventFlow.updateModelInference(
                             gunshotConfidence = result.gunshotConfidence,
                             topLabel = result.topLabel
                         )
 
                         // Track consecutive high-confidence frames
-                        if (result.gunshotConfidence >= GUNSHOT_CONFIDENCE_THRESHOLD) {
+                        if (isAboveThreshold) {
                             consecutiveHighConfidence++
+                            Log.i(TAG, "HIGH CONFIDENCE FRAME #$consecutiveHighConfidence")
                         } else {
                             consecutiveHighConfidence = 0
                         }

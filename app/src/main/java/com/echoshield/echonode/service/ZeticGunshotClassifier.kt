@@ -39,9 +39,18 @@ class ZeticGunshotClassifier(
             classLabels = loadLabels()
             gunshotIndices = classLabels.mapIndexedNotNull { index, label ->
                 val lower = label.lowercase()
-                if (lower.contains("gunshot") || lower.contains("gunfire") || lower.contains("machine gun")) {
-                    index
-                } else null
+                // Expand to catch more gunshot-related sounds from YAMNet
+                val isGunRelated = lower.contains("gunshot") ||
+                    lower.contains("gunfire") ||
+                    lower.contains("machine gun") ||
+                    lower.contains("explosion") ||
+                    lower.contains("artillery") ||
+                    lower.contains("fusillade") ||
+                    lower.contains("cap gun") ||
+                    lower.contains("burst") ||
+                    lower.contains("bang") ||
+                    lower.contains("pop") && !lower.contains("music") // "Burst, pop" but not "Pop music"
+                if (isGunRelated) index else null
             }
 
             val personalKey = BuildConfig.ZETIC_KEY
@@ -64,7 +73,10 @@ class ZeticGunshotClassifier(
             }
             val actualInputSize = modelInputBuffers[0].size() / 4
             Log.i(TAG, "Model=$modelName expects $actualInputSize float samples (${actualInputSize * 4} bytes)")
-            Log.i(TAG, "Zetic YAMNet initialized with ${classLabels.size} labels; gunshot indices=$gunshotIndices")
+            val gunshotLabels = gunshotIndices.map { classLabels.getOrElse(it) { "?" } }
+            Log.i(TAG, "Zetic YAMNet initialized with ${classLabels.size} labels")
+            Log.i(TAG, "Gunshot-related indices (${ gunshotIndices.size}): $gunshotIndices")
+            Log.i(TAG, "Gunshot-related labels: $gunshotLabels")
             runSmokeInference()
             true
         } catch (e: Exception) {
@@ -112,10 +124,18 @@ class ZeticGunshotClassifier(
             }
 
             var gunshotScore = 0f
+            var bestGunshotIdx = -1
             gunshotIndices.forEach { idx ->
-                if (idx in scores.indices) {
-                    gunshotScore = max(gunshotScore, scores[idx])
+                if (idx in scores.indices && scores[idx] > gunshotScore) {
+                    gunshotScore = scores[idx]
+                    bestGunshotIdx = idx
                 }
+            }
+            
+            // Log significant gunshot-related scores for debugging
+            if (gunshotScore > 0.05f) {
+                val bestLabel = if (bestGunshotIdx >= 0) classLabels.getOrElse(bestGunshotIdx) { "?" } else "none"
+                Log.d(TAG, "Gunshot score: ${"%.3f".format(gunshotScore)} from '$bestLabel' (idx=$bestGunshotIdx)")
             }
 
             Result(

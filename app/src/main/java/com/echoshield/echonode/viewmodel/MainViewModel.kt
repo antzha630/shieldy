@@ -27,7 +27,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val connectedPeers: Int = 0,
         val currentAmplitude: Double = 0.0,
         val smoothedAmplitude: Double = 0.0,
-        val detectionThreshold: Double = 450.0,
+        val detectionThreshold: Double = 200.0,
         val gateOpen: Boolean = false,
         val modelGunshotConfidence: Float = 0f,
         val modelTopLabel: String = "",
