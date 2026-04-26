@@ -58,7 +58,11 @@ class EchoOrchestrator(
                 provider.currentLocation.collect { location ->
                     _uiState.value = _uiState.value.copy(
                         locationLabel = location.label,
-                        locationTimestamp = location.timestamp
+                        relativeLocation = location.relativeLocation,
+                        coordinateText = location.coordinateText,
+                        locationTimestamp = location.timestamp,
+                        locationLatitude = location.latitude,
+                        locationLongitude = location.longitude
                     )
                 }
             }

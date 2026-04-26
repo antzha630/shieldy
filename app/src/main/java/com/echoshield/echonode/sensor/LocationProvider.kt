@@ -27,6 +27,8 @@ import java.util.Locale
 
 data class LocationInfo(
     val label: String,
+    val relativeLocation: String,
+    val coordinateText: String,
     val timestamp: String,
     val latitude: Double,
     val longitude: Double
@@ -37,6 +39,8 @@ class LocationProvider(private val context: Context) {
         private const val TAG = "LocationProvider"
         private val DEFAULT_LOCATION = LocationInfo(
             label = "Location unavailable",
+            relativeLocation = "Unknown area",
+            coordinateText = "",
             timestamp = formatTimestamp(System.currentTimeMillis()),
             latitude = 0.0,
             longitude = 0.0
@@ -100,44 +104,74 @@ class LocationProvider(private val context: Context) {
     }
 
     private fun updateLocation(location: Location) {
-        val address = try {
-            val geocoder = Geocoder(context, Locale.getDefault())
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                var result: String? = null
-                geocoder.getFromLocation(location.latitude, location.longitude, 1) { addresses ->
-                    result = addresses.firstOrNull()?.let { addr ->
-                        buildString {
-                            addr.thoroughfare?.let { append(it) }
-                            addr.subThoroughfare?.let { append(" $it") }
-                            addr.locality?.let { append(", $it") }
-                            addr.adminArea?.let { append(", $it") }
-                        }.ifBlank { null }
-                    }
-                }
-                result ?: "${String.format("%.4f", location.latitude)}, ${String.format("%.4f", location.longitude)}"
-            } else {
-                @Suppress("DEPRECATION")
-                val addresses = geocoder.getFromLocation(location.latitude, location.longitude, 1)
-                addresses?.firstOrNull()?.let { addr ->
-                    buildString {
-                        addr.thoroughfare?.let { append(it) }
-                        addr.subThoroughfare?.let { append(" $it") }
-                        addr.locality?.let { append(", $it") }
-                        addr.adminArea?.let { append(", $it") }
-                    }.ifBlank { null }
-                } ?: "${String.format("%.4f", location.latitude)}, ${String.format("%.4f", location.longitude)}"
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Geocoding failed", e)
-            "${String.format("%.4f", location.latitude)}, ${String.format("%.4f", location.longitude)}"
-        }
+        val coordinateText = "${String.format("%.4f", location.latitude)}, ${String.format("%.4f", location.longitude)}"
+        val timestamp = formatTimestamp(System.currentTimeMillis())
 
         _currentLocation.value = LocationInfo(
-            label = address,
-            timestamp = formatTimestamp(System.currentTimeMillis()),
+            label = coordinateText,
+            relativeLocation = "Resolving nearby place...",
+            coordinateText = coordinateText,
+            timestamp = timestamp,
             latitude = location.latitude,
             longitude = location.longitude
         )
-        Log.d(TAG, "Location updated: $address")
+        reverseGeocode(location, coordinateText, timestamp)
+    }
+
+    private fun reverseGeocode(location: Location, coordinateText: String, timestamp: String) {
+        val geocoder = Geocoder(context, Locale.getDefault())
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                geocoder.getFromLocation(location.latitude, location.longitude, 1) { addresses ->
+                    val resolved = addresses.firstOrNull()
+                    updateResolvedAddress(resolved, coordinateText, timestamp, location.latitude, location.longitude)
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                val resolved = geocoder.getFromLocation(location.latitude, location.longitude, 1)?.firstOrNull()
+                updateResolvedAddress(resolved, coordinateText, timestamp, location.latitude, location.longitude)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Geocoding failed", e)
+            _currentLocation.value = _currentLocation.value.copy(
+                label = coordinateText,
+                relativeLocation = "Unknown nearby place"
+            )
+        }
+    }
+
+    private fun updateResolvedAddress(
+        addr: android.location.Address?,
+        coordinateText: String,
+        timestamp: String,
+        latitude: Double,
+        longitude: Double
+    ) {
+        val label = addr?.let {
+            buildString {
+                it.thoroughfare?.let { street -> append(street) }
+                it.subThoroughfare?.let { number -> append(" $number") }
+                it.locality?.let { city -> append(if (isNotBlank()) ", $city" else city) }
+                it.adminArea?.let { state -> append(if (isNotBlank()) ", $state" else state) }
+            }.ifBlank { coordinateText }
+        } ?: coordinateText
+
+        val relative = addr?.let {
+            listOfNotNull(
+                it.featureName,
+                it.subLocality,
+                it.locality
+            ).joinToString(" • ").ifBlank { "Near your current location" }
+        } ?: "Near your current location"
+
+        _currentLocation.value = LocationInfo(
+            label = label,
+            relativeLocation = relative,
+            coordinateText = coordinateText,
+            timestamp = timestamp,
+            latitude = latitude,
+            longitude = longitude
+        )
+        Log.d(TAG, "Location updated: $label ($relative)")
     }
 }

@@ -55,6 +55,13 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.google.android.gms.maps.model.CameraPosition
+import com.google.android.gms.maps.model.LatLng
+import com.google.maps.android.compose.GoogleMap
+import com.google.maps.android.compose.MapProperties
+import com.google.maps.android.compose.Marker
+import com.google.maps.android.compose.MarkerState
+import com.google.maps.android.compose.rememberCameraPositionState
 import com.echoshield.echonode.core.contracts.MeshStatus
 import com.echoshield.echonode.core.contracts.SafetyStatus
 import com.echoshield.echonode.viewmodel.MainViewModel
@@ -112,7 +119,9 @@ fun DashboardScreen(
             colors = CardDefaults.cardColors(containerColor = CardWhite)
         ) {
             Column(
-                modifier = Modifier.padding(24.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Box(
@@ -318,7 +327,11 @@ fun DashboardScreen(
 @Composable
 fun LocationConfirmationScreen(
     locationLabel: String,
+    relativeLocation: String,
+    coordinateText: String,
     locationTimestamp: String,
+    locationLatitude: Double,
+    locationLongitude: Double,
     onConfirm: (Boolean) -> Unit,
     onQuickBarricade: () -> Unit,
     onQuickEvacuate: () -> Unit,
@@ -353,17 +366,36 @@ fun LocationConfirmationScreen(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFFD4E4F7))
             ) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("📍", fontSize = 40.sp)
-                        Text(
-                            text = "Map View",
-                            fontSize = 14.sp,
-                            color = SecondaryText
+                val hasLocation = locationLatitude != 0.0 || locationLongitude != 0.0
+                if (hasLocation) {
+                    val currentLatLng = LatLng(locationLatitude, locationLongitude)
+                    val cameraPositionState = rememberCameraPositionState {
+                        position = CameraPosition.fromLatLngZoom(currentLatLng, 17f)
+                    }
+                    GoogleMap(
+                        modifier = Modifier.fillMaxSize(),
+                        cameraPositionState = cameraPositionState,
+                        properties = MapProperties(isMyLocationEnabled = false)
+                    ) {
+                        Marker(
+                            state = MarkerState(position = currentLatLng),
+                            title = "Your location",
+                            snippet = relativeLocation.ifBlank { locationLabel }
                         )
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("📍", fontSize = 40.sp)
+                            Text(
+                                text = "Waiting for GPS...",
+                                fontSize = 14.sp,
+                                color = SecondaryText
+                            )
+                        }
                     }
                 }
             }
@@ -402,6 +434,32 @@ fun LocationConfirmationScreen(
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
                                 text = locationTimestamp,
+                                fontSize = 14.sp,
+                                color = SecondaryText
+                            )
+                        }
+                    }
+
+                    if (relativeLocation.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("🏢", fontSize = 16.sp)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = relativeLocation,
+                                fontSize = 14.sp,
+                                color = SecondaryText
+                            )
+                        }
+                    }
+
+                    if (coordinateText.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("🧭", fontSize = 16.sp)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = coordinateText,
                                 fontSize = 14.sp,
                                 color = SecondaryText
                             )
@@ -591,53 +649,6 @@ fun IncidentReportScreen(
                 .verticalScroll(scrollState),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = CardWhite),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    SectionLabel("Location")
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = locationLabel.ifBlank { "Unknown" },
-                        fontSize = 15.sp,
-                        color = DarkText
-                    )
-                    if (locationTimestamp.isNotBlank()) {
-                        Text(
-                            text = locationTimestamp,
-                            fontSize = 13.sp,
-                            color = SecondaryText
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    StatusBadge(safetyStatus)
-                }
-            }
-
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = CardWhite),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    SectionLabel("People Details")
-                    Spacer(modifier = Modifier.height(12.dp))
-                    CounterRow(
-                        label = "People with you",
-                        value = companionsCount,
-                        onChange = onCompanionsChange
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    CounterRow(
-                        label = "Injured",
-                        value = injuredCount,
-                        onChange = onInjuredChange
-                    )
-                }
-            }
-
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = CardWhite),

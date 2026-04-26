@@ -137,7 +137,11 @@ fun EchoShieldRoot() {
             AppState.LOCATION_CONFIRMATION.name -> {
                 LocationConfirmationScreen(
                     locationLabel = uiState.locationLabel,
+                    relativeLocation = uiState.relativeLocation,
+                    coordinateText = uiState.coordinateText,
                     locationTimestamp = uiState.locationTimestamp,
+                    locationLatitude = uiState.locationLatitude,
+                    locationLongitude = uiState.locationLongitude,
                     onConfirm = { isConfirmed -> viewModel.confirmLocation(isConfirmed) },
                     onQuickBarricade = { viewModel.quickBarricade() },
                     onQuickEvacuate = { viewModel.quickEvacuate() },
