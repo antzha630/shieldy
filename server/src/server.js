@@ -16,11 +16,12 @@ const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || "";
 const SENDGRID_FROM = process.env.SENDGRID_FROM || "";
 const DISPATCH_EMAIL_TO = process.env.DISPATCH_EMAIL_TO || "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemma-3-27b-it";
+// Use actual Gemini API model names (not Vertex AI / Gemma names which require different endpoint)
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 const GEMINI_MODEL_FALLBACKS = [
-  "gemma-3-27b-it",
-  "gemma-3-12b-it",
-  "gemma-2-9b-it"
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+  "gemini-1.5-pro"
 ];
 
 const incidents = new Map();
@@ -826,50 +827,53 @@ async function generateAgentLiveUpdates(incident) {
     return generateHeuristicLiveUpdates(incident);
   }
 
+  const snapshot = incidentSnapshotForAgent(incident);
   const prompt = [
-    "Generate the EchoShield map live-updates feed from this incident.",
-    "Return 3-6 short user-facing update strings.",
-    "Each string should be concise, actionable, and prioritized by urgency/confidence.",
-    "Prioritize cross-user crowd reports that contain injury status, shooter location/direction, blocked exits, and room-level situational updates.",
-    "Prefer corroborated facts from multiple users over single uncertain claims.",
-    "If facts conflict, include the safest conservative instruction and mark uncertainty briefly.",
-    "Prefer actionable updates over generic acknowledgements.",
-    "Do not repeat instructions, schema, or incident JSON.",
+    "Output a JSON array of 3-6 emergency update strings for a live map feed.",
+    "Each string: short, actionable, user-facing. No markdown, no explanation.",
+    "Prioritize: injuries, shooter location, blocked exits, room-level info.",
+    "Example output format: [\"Active threat north wing\", \"2 injured room 204\", \"East exit blocked\"]",
     "",
-    "INCIDENT DATA (JSON):",
-    JSON.stringify(incidentSnapshotForAgent(incident))
-  ].join("\n");
+    "Incident:",
+    `Status: ${snapshot.status}`,
+    `Action: ${snapshot.recommendedAction}`,
+    snapshot.location ? `Location: ${snapshot.location.latitude}, ${snapshot.location.longitude}` : "",
+    snapshot.notes?.length ? `Notes: ${JSON.stringify(snapshot.notes.slice(-3))}` : "",
+    snapshot.authorityMessages?.length ? `Reports: ${JSON.stringify(snapshot.authorityMessages.slice(-3))}` : ""
+  ].filter(Boolean).join("\n");
 
   try {
     const { model, payload } = await generateWithModelFallback(() => ({
         systemInstruction: {
           parts: [{
-            text: "You produce structured emergency live updates. Return only the requested JSON value."
+            text: "Return ONLY a JSON array of strings. No other text, no explanation, no markdown."
           }]
         },
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
-          temperature: 0.15,
-          topP: 0.9,
-          maxOutputTokens: 180,
-          responseMimeType: "application/json",
-          responseSchema: LIVE_UPDATES_RESPONSE_SCHEMA
+          temperature: 0.1,
+          topP: 0.8,
+          maxOutputTokens: 200
         }
       }));
     const rawText = payload?.candidates?.[0]?.content?.parts
       ?.map((part) => part?.text || "")
       .join("\n")
       .trim();
-    if (isPromptEchoResponse(rawText) || isPromptLikeLiveUpdate(rawText)) {
-      throw new Error("Model echoed live-update prompt instead of JSON");
-    }
 
+    // Try to extract JSON array from response
     const parsed = parseLiveUpdatesResponse(rawText);
     if (parsed.length) {
-      console.info(`[relay] Live updates model=${model}`);
+      console.info(`[relay] Live updates model=${model} count=${parsed.length}`);
       return parsed;
     }
-    throw new Error(`Gemini returned no usable live updates: ${String(rawText || "").slice(0, 220)}`);
+
+    // Check if response is just echoing prompt
+    if (isPromptEchoResponse(rawText) || isPromptLikeLiveUpdate(rawText)) {
+      throw new Error("Model echoed prompt instead of JSON array");
+    }
+
+    throw new Error(`No valid JSON array in response: ${String(rawText || "").slice(0, 120)}`);
   } catch (error) {
     console.warn("[relay] Gemini live-updates failed, fallback used:", error.message);
     return generateHeuristicLiveUpdates(incident);
