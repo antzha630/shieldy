@@ -82,10 +82,10 @@ class AudioSensorService : Service() {
         private const val AMPLITUDE_UPDATE_INTERVAL_MS = 100L
 
         // ─────────────────────────────────────────────────────────────────────
-        // MODEL SETTINGS (YAMNet expects 16kHz input, ~0.975s window)
+        // MODEL SETTINGS (Zetic YAMNet expects 16kHz input, 3s window)
         // ─────────────────────────────────────────────────────────────────────
         private const val MODEL_SAMPLE_RATE = 16000
-        private const val MODEL_INPUT_SAMPLES = 15600
+        private const val MODEL_INPUT_SAMPLES = ZeticGunshotClassifier.INPUT_SAMPLES
 
         fun startService(context: Context) {
             val intent = Intent(context, AudioSensorService::class.java)
