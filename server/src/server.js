@@ -571,6 +571,9 @@ async function generateWithModelFallback(requestBodyBuilder) {
       if (!response.ok) {
         const text = await response.text().catch(() => "");
         const err = new Error(`Gemini HTTP ${response.status} model=${model} ${text.slice(0, 180)}`.trim());
+        err.status = response.status;
+        err.model = model;
+        err.responsePreview = String(text || "").slice(0, 240);
         if (response.status === 404) {
           // Model name unavailable for this API key/project; try next candidate.
           console.warn(`[relay] model unavailable, trying fallback: ${model}`);
@@ -594,6 +597,38 @@ async function generateWithModelFallback(requestBodyBuilder) {
   throw lastError || new Error("No usable Gemini/Gemma model available");
 }
 
+function classifyGeminiFailure(error, rawText = "", stage = "unknown") {
+  const message = String(error?.message || "");
+  const text = String(rawText || "");
+  const status = Number(error?.status || 0);
+
+  if (!GEMINI_API_KEY) return "missing_api_key";
+  if (status === 401 || /401/.test(message)) return "auth_unauthorized";
+  if (status === 403 || /403/.test(message)) return "auth_forbidden_or_quota";
+  if (status === 404 || /404/.test(message)) return "model_not_found";
+  if (status === 429 || /429/.test(message)) return "rate_limited";
+  if (status >= 500 && status <= 599) return "gemini_server_error";
+  if (/timed?\s*out|abort|network|fetch failed|ecconn|enotfound/i.test(message)) return "network_or_timeout";
+  if (/echoed prompt/i.test(message) || isPromptEchoResponse(text) || isPromptLikeLiveUpdate(text)) return "prompt_echo";
+  if (/empty/i.test(message) || !text.trim()) return "empty_response";
+  if (/json/i.test(message) || /No valid JSON array/i.test(message)) return "json_parse_or_shape";
+  return `unknown_${stage}`;
+}
+
+function logGeminiFailure(kind, incidentId, error, extra = {}) {
+  const failure = classifyGeminiFailure(error, extra.rawText, extra.stage);
+  const model = error?.model || extra.model || "unknown";
+  const status = error?.status || "";
+  const rawPreview = String(extra.rawText || error?.responsePreview || "").slice(0, 180);
+  const reason = String(error?.message || "unknown");
+  console.warn(
+    `[relay] ${kind} failed incident=${incidentId || "unknown"} category=${failure} stage=${extra.stage || "unknown"} model=${model} status=${status} reason=${reason}`
+  );
+  if (rawPreview) {
+    console.warn(`[relay] ${kind} raw-preview incident=${incidentId || "unknown"}: ${rawPreview}`);
+  }
+}
+
 async function generateAgentReply(incident, userMessage) {
   if (!GEMINI_API_KEY) {
     return generateHeuristicAuthorityReply(incident, userMessage);
@@ -602,6 +637,7 @@ async function generateAgentReply(incident, userMessage) {
   const systemPrompt = buildAgentContextPrompt(incident);
   const userPrompt = String(userMessage || "").trim();
 
+  let lastRawText = "";
   try {
     const buildRequest = () => ({
         systemInstruction: {
@@ -620,6 +656,7 @@ async function generateAgentReply(incident, userMessage) {
       ?.map((part) => part?.text || "")
       .join("\n")
       .trim();
+    lastRawText = text;
 
     if (!text) {
       throw new Error("Gemini returned empty text");
@@ -660,6 +697,7 @@ async function generateAgentReply(incident, userMessage) {
       ?.map((part) => part?.text || "")
       .join("\n")
       .trim();
+    lastRawText = retryText || lastRawText;
     const retryCleaned = sanitizeEchoedAgentText(retryText);
     if (!retryCleaned || isPromptEchoResponse(retryCleaned)) {
       throw new Error("Model echoed prompt/context instead of returning answer");
@@ -668,7 +706,8 @@ async function generateAgentReply(incident, userMessage) {
     console.info(`[relay] Agent reply model=${retryResult.model} retry=1`);
     return retryCleaned.slice(0, 1800);
   } catch (error) {
-    console.warn("[relay] Gemini reply failed, falling back to heuristic:", error.message);
+    logGeminiFailure("Gemini reply", incident.id, error, { stage: "chat", rawText: lastRawText });
+    console.warn("[relay] Gemini reply fallback=heuristic");
     return generateHeuristicAuthorityReply(incident, userMessage);
   }
 }
@@ -799,6 +838,7 @@ function parseLiveUpdatesResponse(rawText) {
   const jsonArrayText = extractJsonArrayText(rawText);
   if (!jsonArrayText) return [];
 
+  let lastRawText = "";
   try {
     const parsed = JSON.parse(jsonArrayText);
     if (Array.isArray(parsed)) {
@@ -862,6 +902,7 @@ async function generateAgentLiveUpdates(incident) {
       ?.map((part) => part?.text || "")
       .join("\n")
       .trim();
+    lastRawText = rawText;
 
     // Try to extract JSON array from response
     const parsed = parseLiveUpdatesResponse(rawText);
@@ -886,6 +927,7 @@ async function generateAgentLiveUpdates(incident) {
       ?.map((part) => part?.text || "")
       .join("\n")
       .trim();
+    lastRawText = retryRawText || lastRawText;
     const retryParsed = parseLiveUpdatesResponse(retryRawText);
     if (retryParsed.length) {
       console.info(`[relay] Live updates model=${retry.model} retry=1 count=${retryParsed.length}`);
@@ -901,7 +943,11 @@ async function generateAgentLiveUpdates(incident) {
       `No valid JSON array in response: ${String((retryRawText || rawText || "")).slice(0, 120)}`
     );
   } catch (error) {
-    console.warn("[relay] Gemini live-updates failed, fallback used:", error.message);
+    logGeminiFailure("Gemini live-updates", incident.id, error, {
+      stage: "live_updates",
+      rawText: lastRawText
+    });
+    console.warn("[relay] Gemini live-updates fallback=heuristic");
     return generateHeuristicLiveUpdates(incident);
   }
 }
