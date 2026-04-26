@@ -7,6 +7,12 @@ build/
 .idea/
 *.iml
 local.properties
+.env
+.env.*
+!.env.example
+server/.env
+server/.env.*
+!server/.env.example
 
 # Android
 *.apk
