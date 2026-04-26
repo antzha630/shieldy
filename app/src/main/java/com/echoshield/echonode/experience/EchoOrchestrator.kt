@@ -138,7 +138,8 @@ class EchoOrchestrator(
         if (incident.status != "CONFIRMED_RESPONSE") return
 
         val sessionId = incident.incidentId.removePrefix("session-").ifBlank { incident.incidentId }
-        if (barricadeSplashShownForSessionId == sessionId) return
+        val shouldShowBarricadeSplash = shouldShowBarricadeSplashFor(sessionId)
+        if (!shouldShowBarricadeSplash && lastThreatSessionId == sessionId) return
 
         val latitude = incident.threatLatitude ?: _uiState.value.threatLatitude
         val longitude = incident.threatLongitude ?: _uiState.value.threatLongitude
@@ -157,10 +158,12 @@ class EchoOrchestrator(
                 )
             )
         } else {
-            barricadeSplashShownForSessionId = sessionId
+            if (shouldShowBarricadeSplash) {
+                barricadeSplashShownForSessionId = sessionId
+            }
             lastThreatSessionId = sessionId
             _uiState.value = _uiState.value.copy(
-                appState = AppState.BARRICADE,
+                appState = if (shouldShowBarricadeSplash) AppState.BARRICADE else AppState.INCIDENT_REPORT,
                 threatZone = "Threat confirmed by ${incident.confirmedByCount.coerceAtLeast(1)} devices",
                 evacuationRoute = DEFAULT_EVACUATION_ROUTE,
                 relativeLocation = incident.recommendedAction
@@ -169,7 +172,7 @@ class EchoOrchestrator(
     }
 
     private fun handleResponseTrigger(trigger: ResponseTriggerEvent) {
-        val shouldShowBarricadeSplash = barricadeSplashShownForSessionId != trigger.sessionId
+        val shouldShowBarricadeSplash = shouldShowBarricadeSplashFor(trigger.sessionId)
         if (shouldShowBarricadeSplash) {
             barricadeSplashShownForSessionId = trigger.sessionId
         }
@@ -230,6 +233,13 @@ class EchoOrchestrator(
             "Response trigger session=${trigger.sessionId} confirmed=${trigger.confirmedByNodes.size} " +
                 "showBarricade=$shouldShowBarricadeSplash appState=${_uiState.value.appState}"
         )
+    }
+
+    private fun shouldShowBarricadeSplashFor(sessionId: String): Boolean {
+        val isNewSession = barricadeSplashShownForSessionId != sessionId
+        val alreadyInIncidentFlow = _uiState.value.appState != AppState.LISTENING
+        // If user is already in incident tabs, don't interrupt with red splash again.
+        return isNewSession && !alreadyInIncidentFlow
     }
 
     private fun generateDistanceBasedMessage(
