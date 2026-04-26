@@ -287,8 +287,8 @@ class EchoOrchestrator(
         val myLat = _uiState.value.locationLatitude
         val myLon = _uiState.value.locationLongitude
 
-        // Generate a random threat location 80-120 meters away in a random direction
-        val distanceMeters = Random.nextDouble(80.0, 120.0)
+        // Generate a random threat location around 30 meters away in a random direction
+        val distanceMeters = Random.nextDouble(25.0, 35.0)
         val bearingRadians = Random.nextDouble(0.0, 2 * PI)
 
         val (threatLat, threatLon) = offsetLatLon(myLat, myLon, distanceMeters, bearingRadians)
