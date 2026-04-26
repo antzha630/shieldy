@@ -521,7 +521,16 @@ function isPromptEchoResponse(text) {
 }
 
 function sanitizeEchoedAgentText(rawText) {
-  const lines = String(rawText || "")
+  const stripped = String(rawText || "")
+    // Strip code fences entirely.
+    .replace(/```[a-zA-Z]*\n?/g, "")
+    .replace(/```/g, "")
+    // Strip leading filler preambles like "Here is the answer:", "Here is the JSON requested:",
+    // "Here's a concise summary:", "Sure, here is...", "Okay, here's...".
+    .replace(/^\s*(here(?:'s| is)|sure[,!]?\s*here(?:'s| is)|okay[,!]?\s*here(?:'s| is))[^\n]{0,80}:?\s*\n?/i, "")
+    .trim();
+
+  const lines = stripped
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
@@ -1020,6 +1029,7 @@ async function generateAgentLiveUpdates(incident) {
         }
       }));
 
+  let lastRawText = "";
   try {
     const { model, payload } = await askModel(prompt, 260);
     const rawText = payload?.candidates?.[0]?.content?.parts
