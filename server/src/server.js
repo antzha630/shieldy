@@ -892,7 +892,8 @@ async function generateAgentLiveUpdates(incident) {
           temperature: 0.1,
           topP: 0.8,
           maxOutputTokens,
-          responseMimeType: "application/json"
+          responseMimeType: "application/json",
+          responseSchema: LIVE_UPDATES_RESPONSE_SCHEMA
         }
       }));
 
