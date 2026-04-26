@@ -119,6 +119,8 @@ dependencies {
 
     // On-device audio ML inference (Zetic Melange with NPU acceleration)
     implementation("com.zeticai.mlange:mlange:1.6.1")
+    // Legacy TensorFlow Lite YAMNet runtime for weighted dual-model voting.
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

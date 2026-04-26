@@ -73,6 +73,9 @@ class AudioSensorService : Service() {
         // 0.10 is more sensitive - lowered from 0.15 since we need more positives.
         // Increase to 0.20-0.35 if getting too many false positives.
         private const val GUNSHOT_CONFIDENCE_THRESHOLD = 0.10f
+        // Weighted dual-model confidence (legacy TF gets larger weight by design).
+        private const val LEGACY_TF_WEIGHT = 0.70f
+        private const val ZETIC_WEIGHT = 0.30f
         
         // Minimum consecutive high-confidence frames before trigger.
         // Prevents single-frame noise spikes from triggering.
@@ -115,10 +118,13 @@ class AudioSensorService : Service() {
     private var audioRecord: AudioRecord? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var meshNetworkManager: MeshNetworkManager
-    private lateinit var gunshotClassifier: ZeticGunshotClassifier
+    private lateinit var zeticClassifier: ZeticGunshotClassifier
+    private lateinit var legacyTfClassifier: LegacyTfLiteGunshotClassifier
     private var locationProvider: LocationProvider? = null
     @Volatile
-    private var classifierReady = false
+    private var zeticReady = false
+    @Volatile
+    private var legacyTfReady = false
     
     // Two-tier detector state
     private var lastTriggerTime = 0L
@@ -150,13 +156,17 @@ class AudioSensorService : Service() {
         createNotificationChannel()
         acquireWakeLock()
         meshNetworkManager = MeshNetworkManager.getInstance(applicationContext)
-        gunshotClassifier = ZeticGunshotClassifier(applicationContext)
+        zeticClassifier = ZeticGunshotClassifier(applicationContext)
+        legacyTfClassifier = LegacyTfLiteGunshotClassifier(applicationContext)
         locationProvider = LocationProvider(applicationContext)
         
         serviceScope.launch {
-            val modelInitialized = gunshotClassifier.initialize()
-            classifierReady = modelInitialized
-            Log.i(TAG, "Zetic gunshot classifier initialized: $modelInitialized")
+            zeticReady = zeticClassifier.initialize()
+            Log.i(TAG, "Zetic gunshot classifier initialized: $zeticReady")
+        }
+        serviceScope.launch {
+            legacyTfReady = legacyTfClassifier.initialize()
+            Log.i(TAG, "Legacy TF classifier initialized: $legacyTfReady")
         }
     }
 
@@ -249,8 +259,8 @@ class AudioSensorService : Service() {
             try {
                 isProcessingWakeRequest = true
                 
-                if (!classifierReady) {
-                    Log.w(TAG, "Classifier not ready for wake vote, voting NO for $sessionId")
+                if (!zeticReady && !legacyTfReady) {
+                    Log.w(TAG, "No classifier ready for wake vote, voting NO for $sessionId")
                     meshNetworkManager.submitClassifyVote(sessionId, false, 0f)
                     return@launch
                 }
@@ -264,13 +274,17 @@ class AudioSensorService : Service() {
                     FloatArray(MODEL_INPUT_SAMPLES)
                 }
                 
-                val result = gunshotClassifier.classify(modelInput)
+                val result = classifyWeighted(modelInput)
 
                 if (result != null) {
-                    val isGunshot = result.gunshotConfidence >= GUNSHOT_CONFIDENCE_THRESHOLD
-                    Log.i(TAG, "Wake classify result: gunshot=$isGunshot conf=${result.gunshotConfidence} top=${result.topLabel}")
-                    meshNetworkManager.submitClassifyVote(sessionId, isGunshot, result.gunshotConfidence)
-                    SystemEventFlow.updateModelInference(result.gunshotConfidence, result.topLabel)
+                    val isGunshot = result.weightedConfidence >= GUNSHOT_CONFIDENCE_THRESHOLD
+                    Log.i(
+                        TAG,
+                        "Wake classify result: gunshot=$isGunshot weighted=${result.weightedConfidence} " +
+                            "tf=${result.legacyTfConfidence} zetic=${result.zeticConfidence} top=${result.topLabel}"
+                    )
+                    meshNetworkManager.submitClassifyVote(sessionId, isGunshot, result.weightedConfidence)
+                    SystemEventFlow.updateModelInference(result.weightedConfidence, result.topLabel)
                 } else {
                     Log.w(TAG, "Classifier returned null for $sessionId")
                     meshNetworkManager.submitClassifyVote(sessionId, false, 0f)
@@ -308,7 +322,8 @@ class AudioSensorService : Service() {
         wakeRequestJob = null
         stopAudioRecording()
         meshNetworkManager.stopMesh()
-        gunshotClassifier.close()
+        zeticClassifier.close()
+        legacyTfClassifier.close()
         locationProvider?.stopLocationUpdates()
         releaseWakeLock()
         serviceScope.cancel()
@@ -553,23 +568,24 @@ class AudioSensorService : Service() {
                 }
 
                 // TIER 2: ML inference only when gate is open, classifier ready, and rate limit allows
-                val shouldRunModel = gateOpen && classifierReady &&
+                val shouldRunModel = gateOpen && (zeticReady || legacyTfReady) &&
                     (currentTime - lastModelInference >= MODEL_INFERENCE_INTERVAL_MS)
 
                 if (shouldRunModel) {
                     lastModelInference = currentTime
                     val modelInput = snapshotModelInput(rollingModelSamples, rollingWriteIndex)
-                    val result = gunshotClassifier.classify(modelInput)
+                    val result = classifyWeighted(modelInput)
                     
                     if (result != null) {
                         // Log every inference for debugging detection issues
-                        val isAboveThreshold = result.gunshotConfidence >= GUNSHOT_CONFIDENCE_THRESHOLD
-                        Log.d(TAG, "ML: gunshot=${"%.3f".format(result.gunshotConfidence)} " +
+                        val isAboveThreshold = result.weightedConfidence >= GUNSHOT_CONFIDENCE_THRESHOLD
+                        Log.d(TAG, "ML: weighted=${"%.3f".format(result.weightedConfidence)} " +
+                            "tf=${"%.3f".format(result.legacyTfConfidence)} zetic=${"%.3f".format(result.zeticConfidence)} " +
                             "(thresh=$GUNSHOT_CONFIDENCE_THRESHOLD, above=$isAboveThreshold) " +
                             "top=${result.topLabel}@${"%.3f".format(result.topScore)}")
                         
                         SystemEventFlow.updateModelInference(
-                            gunshotConfidence = result.gunshotConfidence,
+                            gunshotConfidence = result.weightedConfidence,
                             topLabel = result.topLabel
                         )
 
@@ -586,7 +602,7 @@ class AudioSensorService : Service() {
                             cooldownRemaining == 0L) {
                             Log.w(
                                 TAG,
-                                "SENTINEL DETECTED THREAT! gunshot=${result.gunshotConfidence} " +
+                                "SENTINEL DETECTED THREAT! weighted=${result.weightedConfidence} " +
                                 "consecutive=$consecutiveHighConfidence top=${result.topLabel}"
                             )
                             lastTriggerTime = currentTime
@@ -675,6 +691,48 @@ class AudioSensorService : Service() {
         System.arraycopy(ringBuffer, writeIndex, output, 0, tailSize)
         System.arraycopy(ringBuffer, 0, output, tailSize, writeIndex)
         return output
+    }
+
+    private data class WeightedClassificationResult(
+        val weightedConfidence: Float,
+        val legacyTfConfidence: Float,
+        val zeticConfidence: Float,
+        val topLabel: String,
+        val topScore: Float
+    )
+
+    private fun classifyWeighted(modelInput: FloatArray): WeightedClassificationResult? {
+        val legacy = if (legacyTfReady) legacyTfClassifier.classify(modelInput) else null
+        val zetic = if (zeticReady) zeticClassifier.classify(modelInput) else null
+
+        if (legacy == null && zetic == null) return null
+
+        val legacyScore = legacy?.gunshotConfidence ?: 0f
+        val zeticScore = zetic?.gunshotConfidence ?: 0f
+        val weighted = when {
+            legacy != null && zetic != null -> (legacyScore * LEGACY_TF_WEIGHT) + (zeticScore * ZETIC_WEIGHT)
+            legacy != null -> legacyScore
+            else -> zeticScore
+        }.coerceIn(0f, 1f)
+
+        val dominantLabel = when {
+            legacy != null && zetic != null -> if (legacyScore >= zeticScore) legacy.topLabel else zetic.topLabel
+            legacy != null -> legacy.topLabel
+            else -> zetic?.topLabel ?: "unknown"
+        }
+        val dominantTopScore = when {
+            legacy != null && zetic != null -> if (legacyScore >= zeticScore) legacy.topScore else zetic.topScore
+            legacy != null -> legacy.topScore
+            else -> zetic?.topScore ?: 0f
+        }
+
+        return WeightedClassificationResult(
+            weightedConfidence = weighted,
+            legacyTfConfidence = legacyScore,
+            zeticConfidence = zeticScore,
+            topLabel = dominantLabel,
+            topScore = dominantTopScore
+        )
     }
 
     private fun stopAudioRecording() {
