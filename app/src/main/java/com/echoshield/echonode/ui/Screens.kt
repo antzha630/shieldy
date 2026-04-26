@@ -1143,81 +1143,87 @@ private fun IncidentChatTab(
                         fontSize = 13.sp
                     )
                     Spacer(modifier = Modifier.height(10.dp))
-                } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f, fill = false),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        state = listState
-                    ) {
-                        items(chatItems, key = { it.id }) { msg ->
-                            val role = msg.role.lowercase()
-                            val isUser = role == "user"
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+                }
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    state = listState
+                ) {
+                    items(chatItems, key = { it.id }) { msg ->
+                        val role = msg.role.lowercase()
+                        val isUser = role == "user"
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+                        ) {
+                            Column(
+                                horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
                             ) {
-                                Column(
-                                    horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+                                Text(
+                                    text = if (isUser) "You" else msg.sender,
+                                    fontSize = 11.sp,
+                                    color = SecondaryText,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(0.82f),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (isUser) PrimaryBlue else Color(0xFFF1F5FB)
+                                    ),
+                                    shape = RoundedCornerShape(14.dp)
                                 ) {
-                                    Text(
-                                        text = if (isUser) "You" else msg.sender,
-                                        fontSize = 11.sp,
-                                        color = SecondaryText,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                    Spacer(modifier = Modifier.height(3.dp))
-                                    Card(
-                                        modifier = Modifier.fillMaxWidth(0.82f),
-                                        colors = CardDefaults.cardColors(
-                                            containerColor = if (isUser) PrimaryBlue else Color(0xFFF1F5FB)
-                                        ),
-                                        shape = RoundedCornerShape(14.dp)
-                                    ) {
-                                        Column(modifier = Modifier.padding(10.dp)) {
-                                            Text(
-                                                text = msg.message,
-                                                fontSize = 13.sp,
-                                                color = if (isUser) Color.White else DarkText
-                                            )
-                                        }
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Text(
+                                            text = msg.message,
+                                            fontSize = 13.sp,
+                                            color = if (isUser) Color.White else DarkText
+                                        )
                                     }
                                 }
                             }
                         }
                     }
-                    Spacer(modifier = Modifier.height(10.dp))
                 }
+            }
+        }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = CardWhite),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = incidentNotes,
+                    onValueChange = onNotesChange,
+                    modifier = Modifier
+                        .fillMaxWidth(0.84f)
+                        .height(56.dp),
+                    placeholder = { Text("Type your message...", color = SecondaryText) },
+                    shape = RoundedCornerShape(14.dp),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send)
+                )
+                IconButton(
+                    onClick = onSend,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .background(PrimaryBlue, RoundedCornerShape(24.dp))
                 ) {
-                    OutlinedTextField(
-                        value = incidentNotes,
-                        onValueChange = onNotesChange,
-                        modifier = Modifier
-                            .fillMaxWidth(0.84f)
-                            .height(56.dp),
-                        placeholder = { Text("Type your message...", color = SecondaryText) },
-                        shape = RoundedCornerShape(14.dp),
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send)
+                    Text(
+                        text = "➤",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
                     )
-                    IconButton(
-                        onClick = onSend,
-                        modifier = Modifier
-                            .size(48.dp)
-                            .background(PrimaryBlue, RoundedCornerShape(24.dp))
-                    ) {
-                        Text(
-                            text = "➤",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
                 }
             }
         }

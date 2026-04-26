@@ -497,6 +497,32 @@ function isPromptEchoResponse(text) {
   );
 }
 
+function sanitizeEchoedAgentText(rawText) {
+  const lines = String(rawText || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const filtered = lines.filter((line) => {
+    const lower = line.toLowerCase();
+    return !(
+      lower.includes("incident data (json)") ||
+      lower.includes("use only provided json data") ||
+      lower.includes("echoshield responder (concise emergency coordination assistant)") ||
+      lower.includes("constraint check") ||
+      lower.startsWith("* incidentid:") ||
+      lower.startsWith("* status:") ||
+      lower.startsWith("* recommendedaction:") ||
+      lower.startsWith("* policebrief:") ||
+      lower.startsWith("* medicalbrief:") ||
+      lower.startsWith("* location:") ||
+      lower.startsWith("* observations")
+    );
+  });
+
+  return filtered.join("\n").trim();
+}
+
 function orderedModelCandidates() {
   const seen = new Set();
   const ordered = [];
@@ -557,7 +583,7 @@ async function generateAgentReply(incident, userMessage) {
   const userPrompt = String(userMessage || "").trim();
 
   try {
-    const { model, payload } = await generateWithModelFallback(() => ({
+    const buildRequest = () => ({
         system_instruction: {
           parts: [{ text: systemPrompt }]
         },
@@ -567,7 +593,9 @@ async function generateAgentReply(incident, userMessage) {
           topP: 0.9,
           maxOutputTokens: 180
         }
-      }));
+      });
+
+    const { model, payload } = await generateWithModelFallback(buildRequest);
     const text = payload?.candidates?.[0]?.content?.parts
       ?.map((part) => part?.text || "")
       .join("\n")
@@ -576,11 +604,49 @@ async function generateAgentReply(incident, userMessage) {
     if (!text) {
       throw new Error("Gemini returned empty text");
     }
-    if (isPromptEchoResponse(text)) {
+
+    const cleanedText = sanitizeEchoedAgentText(text);
+    if (cleanedText && !isPromptEchoResponse(cleanedText)) {
+      console.info(`[relay] Agent reply model=${model}`);
+      return cleanedText.slice(0, 1800);
+    }
+
+    // One retry with stricter anti-echo instruction before heuristic fallback.
+    const retryPrompt = [
+      "Return ONLY the final user-facing answer.",
+      "Do NOT repeat or quote instructions, JSON, analysis, or constraint checks.",
+      "Give 2-5 short action bullets for immediate safety.",
+      "",
+      "INCIDENT SUMMARY:",
+      `Status: ${incident.status}`,
+      `Recommended Action: ${incident.recommendedAction || "n/a"}`,
+      `Police Brief: ${incident.policeBrief || "n/a"}`,
+      `Medical Brief: ${incident.medicalBrief || "n/a"}`,
+      "",
+      `USER MESSAGE: ${userPrompt}`
+    ].join("\n");
+
+    const retryResult = await generateWithModelFallback(() => ({
+      system_instruction: { parts: [{ text: "You are an emergency assistant. Output only final answer text." }] },
+      contents: [{ role: "user", parts: [{ text: retryPrompt }] }],
+      generationConfig: {
+        temperature: 0.1,
+        topP: 0.8,
+        maxOutputTokens: 160
+      }
+    }));
+
+    const retryText = retryResult?.payload?.candidates?.[0]?.content?.parts
+      ?.map((part) => part?.text || "")
+      .join("\n")
+      .trim();
+    const retryCleaned = sanitizeEchoedAgentText(retryText);
+    if (!retryCleaned || isPromptEchoResponse(retryCleaned)) {
       throw new Error("Model echoed prompt/context instead of returning answer");
     }
-    console.info(`[relay] Agent reply model=${model}`);
-    return text.slice(0, 1800);
+
+    console.info(`[relay] Agent reply model=${retryResult.model} retry=1`);
+    return retryCleaned.slice(0, 1800);
   } catch (error) {
     console.warn("[relay] Gemini reply failed, falling back to heuristic:", error.message);
     return generateHeuristicAuthorityReply(incident, userMessage);
