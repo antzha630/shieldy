@@ -433,7 +433,7 @@ function generateHeuristicAuthorityReply(incident, userMessage) {
     return `Route guidance update: ${incident.recommendedAction} If movement is unsafe, shelter in ${roomHint} until the next update.`;
   }
   if (message.includes("shooter") || message.includes("gun") || message.includes("shots")) {
-    return "Police acknowledges report. Maintain silence, lock doors if possible, and avoid line-of-sight with hallways/windows.";
+    return "Threat report logged. Shelter in place now: lock or barricade doors, silence your phone, stay low, and avoid line-of-sight with hallways/windows. Send your room or landmark and injury count if safe.";
   }
   if (message.includes("safe") || message.includes("clear")) {
     return "Status received. Continue to hold position and submit updates every 30-60 seconds until all-clear is confirmed.";
@@ -493,12 +493,15 @@ function buildAgentContextPrompt(incident) {
   const snapshot = incidentSnapshotForAgent(incident);
 
   return [
-    "You are EchoShield Responder, a concise emergency coordination assistant.",
-    "Use ONLY the incident data below. Do not invent facts or resources.",
-    "Prioritize immediate safety, practical next actions, and short location-aware guidance.",
+    "You are EchoShield Responder, a calm emergency coordination assistant.",
+    "Use ONLY the incident data below. Do not invent shooter location, injuries, dispatch status, or official response.",
+    "Do not use markdown, bold text, headings, all-caps warnings, emojis, or dramatic labels like URGENT.",
+    "Do not say \"shooter nearby\"; say confirmed threat alert or reported threat location instead.",
+    "When the data only comes from gunshot detection, say confirmed threat alert or reported shot origin, not confirmed shooter.",
+    "Prioritize immediate safety, practical next actions, and one focused follow-up question.",
     "If user asks for unknown info, say what is missing and ask one focused follow-up question.",
     "Never claim law enforcement is physically present unless data says so.",
-    "Keep response <= 120 words. Bullet points are okay.",
+    "Keep response as 2-4 short plain-text sentences, <= 90 words.",
     "",
     "INCIDENT DATA (JSON):",
     JSON.stringify(snapshot)
@@ -543,8 +546,79 @@ function sanitizeEchoedAgentText(rawText) {
   return filtered.join("\n").trim();
 }
 
-function forceAssistantAnswerFallback(rawText) {
-  const cleaned = sanitizeEchoedAgentText(rawText);
+const AGENT_REPLY_RESPONSE_SCHEMA = {
+  type: "object",
+  properties: {
+    message: {
+      type: "string",
+      description: "A calm plain-text emergency response. No markdown, headings, bullets, labels, or invented facts."
+    }
+  },
+  required: ["message"],
+  additionalProperties: false
+};
+
+function extractJsonObjectText(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) return null;
+  if (text.startsWith("{") && text.endsWith("}")) return text;
+
+  const fenced = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/i);
+  if (fenced) return fenced[1];
+
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    return text.slice(start, end + 1);
+  }
+
+  return null;
+}
+
+function stripResponderMarkdown(rawText) {
+  return String(rawText || "")
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/^[#>\s]+/gm, "")
+    .replace(/^[-*\d.)\s]+/gm, "")
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function parseAgentReplyResponse(rawText) {
+  const jsonObjectText = extractJsonObjectText(rawText);
+  if (jsonObjectText) {
+    try {
+      const parsed = JSON.parse(jsonObjectText);
+      if (parsed && typeof parsed.message === "string") {
+        return stripResponderMarkdown(parsed.message);
+      }
+    } catch {
+      // Fall through to plain-text cleanup.
+    }
+  }
+
+  return stripResponderMarkdown(sanitizeEchoedAgentText(rawText));
+}
+
+function agentReplyLooksBad(reply, incident, userMessage) {
+  const text = String(reply || "").trim();
+  const lower = text.toLowerCase();
+  if (text.length < 40) return true;
+  if (/[,:;]$/.test(text)) return true;
+  if (isPromptEchoResponse(text)) return true;
+  if (/\burgent\b/.test(lower)) return true;
+  if (/\b(shooter nearby|shooter is nearby|nearby shooter)\b/.test(lower)) return true;
+  if (/\b(police|law enforcement)\b.{0,24}\b(on scene|arrived|here)\b/.test(lower)) {
+    return true;
+  }
+  return false;
+}
+
+function forceAssistantAnswerFallback(rawText, incident, userMessage) {
+  const cleaned = parseAgentReplyResponse(rawText);
   if (!cleaned) return "";
   const lines = cleaned
     .split("\n")
@@ -552,7 +626,9 @@ function forceAssistantAnswerFallback(rawText) {
     .filter(Boolean)
     .filter((line) => !/^(analysis|constraint|incident data|input|goal|json)\b/i.test(line))
     .slice(0, 6);
-  return lines.join("\n").trim().slice(0, 1800);
+  const salvaged = lines.join("\n").trim().slice(0, 1800);
+  if (!salvaged || agentReplyLooksBad(salvaged, incident, userMessage)) return "";
+  return salvaged;
 }
 
 function orderedModelCandidates() {
@@ -652,14 +728,16 @@ async function generateAgentReply(incident, userMessage) {
   let lastRawText = "";
   try {
     const buildRequest = () => ({
-        systemInstruction: {
+        system_instruction: {
           parts: [{ text: systemPrompt }]
         },
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
         generationConfig: {
           temperature: 0.2,
           topP: 0.9,
-          maxOutputTokens: 180
+          maxOutputTokens: 180,
+          responseMimeType: "application/json",
+          responseJsonSchema: AGENT_REPLY_RESPONSE_SCHEMA
         }
       });
 
@@ -674,17 +752,18 @@ async function generateAgentReply(incident, userMessage) {
       throw new Error("Gemini returned empty text");
     }
 
-    const cleanedText = sanitizeEchoedAgentText(text);
-    if (cleanedText && !isPromptEchoResponse(cleanedText)) {
+    const cleanedText = parseAgentReplyResponse(text);
+    if (cleanedText && !agentReplyLooksBad(cleanedText, incident, userPrompt)) {
       console.info(`[relay] Agent reply model=${model}`);
       return cleanedText.slice(0, 1800);
     }
 
     // One retry with stricter anti-echo instruction before heuristic fallback.
     const retryPrompt = [
-      "Return ONLY the final user-facing answer.",
-      "Do NOT repeat or quote instructions, JSON, analysis, or constraint checks.",
-      "Give 2-5 short action bullets for immediate safety.",
+      "Return only JSON with a message field.",
+      "The message must be plain text: no markdown, no bold, no bullets, no URGENT label.",
+      "Use only the incident summary. Do not invent shooter proximity or official response.",
+      "Give 2-4 short sentences for immediate safety and one missing-info question.",
       "",
       "INCIDENT SUMMARY:",
       `Status: ${incident.status}`,
@@ -696,12 +775,14 @@ async function generateAgentReply(incident, userMessage) {
     ].join("\n");
 
     const retryResult = await generateWithModelFallback(() => ({
-      systemInstruction: { parts: [{ text: "You are an emergency assistant. Output only final answer text." }] },
+      system_instruction: { parts: [{ text: "You are a calm emergency assistant. Output only the requested JSON object." }] },
       contents: [{ role: "user", parts: [{ text: retryPrompt }] }],
       generationConfig: {
         temperature: 0.1,
         topP: 0.8,
-        maxOutputTokens: 160
+        maxOutputTokens: 160,
+        responseMimeType: "application/json",
+        responseJsonSchema: AGENT_REPLY_RESPONSE_SCHEMA
       }
     }));
 
@@ -710,20 +791,20 @@ async function generateAgentReply(incident, userMessage) {
       .join("\n")
       .trim();
     lastRawText = retryText || lastRawText;
-    const retryCleaned = sanitizeEchoedAgentText(retryText);
-    if (retryCleaned && !isPromptEchoResponse(retryCleaned)) {
+    const retryCleaned = parseAgentReplyResponse(retryText);
+    if (retryCleaned && !agentReplyLooksBad(retryCleaned, incident, userPrompt)) {
       console.info(`[relay] Agent reply model=${retryResult.model} retry=1`);
       return retryCleaned.slice(0, 1800);
     }
 
     // Last-ditch salvage: keep whatever user-facing lines remain after sanitization.
-    const salvaged = forceAssistantAnswerFallback(retryText || text);
+    const salvaged = forceAssistantAnswerFallback(retryText || text, incident, userPrompt);
     if (salvaged) {
       console.info(`[relay] Agent reply model=${retryResult.model} retry=1 salvaged=1`);
       return salvaged;
     }
 
-    throw new Error("Model echoed prompt/context instead of returning answer");
+    throw new Error("Model reply failed quality checks");
   } catch (error) {
     logGeminiFailure("Gemini reply", incident.id, error, { stage: "chat", rawText: lastRawText });
     console.warn("[relay] Gemini reply fallback=heuristic");
@@ -924,7 +1005,7 @@ async function generateAgentLiveUpdates(incident) {
   ].filter(Boolean).join("\n");
 
   const askModel = (userPrompt, maxOutputTokens = 200) => generateWithModelFallback(() => ({
-        systemInstruction: {
+        system_instruction: {
           parts: [{
             text: "Return ONLY a JSON array of strings. No other text, no explanation, no markdown."
           }]
@@ -935,7 +1016,7 @@ async function generateAgentLiveUpdates(incident) {
           topP: 0.8,
           maxOutputTokens,
           responseMimeType: "application/json",
-          responseSchema: LIVE_UPDATES_RESPONSE_SCHEMA
+          responseJsonSchema: LIVE_UPDATES_RESPONSE_SCHEMA
         }
       }));
 
