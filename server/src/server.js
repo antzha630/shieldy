@@ -2,6 +2,7 @@ import http from "node:http";
 import crypto from "node:crypto";
 
 const PORT = Number.parseInt(process.env.PORT || "8787", 10);
+const HOST = process.env.HOST || "0.0.0.0";
 const API_KEY = process.env.ECHOSHIELD_RELAY_API_KEY || "";
 const INCIDENT_TTL_MS = Number.parseInt(process.env.INCIDENT_TTL_MS || "900000", 10);
 const JSON_LIMIT_BYTES = 1024 * 1024;
@@ -831,8 +832,8 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`EchoShield relay listening on http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`EchoShield relay listening on http://${HOST}:${PORT}`);
   if (!API_KEY) {
     console.log("ECHOSHIELD_RELAY_API_KEY is not set; write endpoints are open for local demo.");
   }
