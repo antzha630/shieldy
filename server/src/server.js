@@ -1464,9 +1464,7 @@ function dashboardHtml() {
         <p><strong>Police:</strong> ${escapeHtml(incident.policeBrief)}</p>
         <p><strong>Medical:</strong> ${escapeHtml(incident.medicalBrief)}</p>
         <p><strong>Devices:</strong> ${incident.devices.length} | <strong>Observations:</strong> ${incident.observations.length}</p>
-        <form method="post" action="/v1/incidents/${encodeURIComponent(incident.id)}/clear-notifications">
-          <button type="submit">Clear Notifications</button>
-        </form>
+        <button onclick="fetch('/v1/incidents/${encodeURIComponent(incident.id)}/clear-notifications', {method: 'POST', headers: {'authorization': 'Bearer ${API_KEY}'}}).then(() => window.location.reload())">Clear Notifications</button>
       </article>
     `).join("\n");
 
@@ -1617,7 +1615,10 @@ function dispatchHtml(selectedIncidentId = null) {
         if (!message) return;
         await fetch("/v1/incidents/" + encodeURIComponent(incidentId) + "/authority-messages", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { 
+            "content-type": "application/json",
+            "authorization": "Bearer ${API_KEY}"
+          },
           body: JSON.stringify({
             sender: document.getElementById("sender").value || "Demo Dispatcher",
             role: "authority",
@@ -1634,7 +1635,8 @@ function dispatchHtml(selectedIncidentId = null) {
         const ok = window.confirm("Clear all notifications/messages for this incident?");
         if (!ok) return;
         await fetch("/v1/incidents/" + encodeURIComponent(incidentId) + "/clear-notifications", {
-          method: "POST"
+          method: "POST",
+          headers: { "authorization": "Bearer ${API_KEY}" }
         });
         window.location.reload();
       });
