@@ -29,3 +29,8 @@ Thumbs.db
 
 # Kotlin
 *.kotlin_module
+
+# Server secrets
+server/.env
+server/.env.*
+!server/.env.example
