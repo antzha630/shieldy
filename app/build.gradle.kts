@@ -15,6 +15,7 @@ val mapsApiKey = (localProperties.getProperty("MAPS_API_KEY") ?: "").trim()
 val zeticPersonalKey = (localProperties.getProperty("ZETIC_PERSONAL_KEY") ?: "").trim()
 val cloudRelayUrl = (localProperties.getProperty("CLOUD_RELAY_URL") ?: "").trim()
 val cloudRelayApiKey = (localProperties.getProperty("CLOUD_RELAY_API_KEY") ?: "").trim()
+val zeticModelName = (localProperties.getProperty("ZETIC_MODEL_NAME") ?: "antzha630/EchoShield").trim()
 
 android {
     namespace = "com.echoshield.echonode"
@@ -31,6 +32,7 @@ android {
         manifestPlaceholders["CLOUD_RELAY_API_KEY"] = cloudRelayApiKey
 
         buildConfigField("String", "ZETIC_KEY", "\"$zeticPersonalKey\"")
+        buildConfigField("String", "ZETIC_MODEL_NAME", "\"$zeticModelName\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -116,7 +118,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
     // On-device audio ML inference (Zetic Melange with NPU acceleration)
-    implementation("com.zeticai.mlange:mlange:1.6.1+")
+    implementation("com.zeticai.mlange:mlange:1.6.1")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

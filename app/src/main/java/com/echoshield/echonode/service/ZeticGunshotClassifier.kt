@@ -9,8 +9,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import kotlin.math.max
 
@@ -19,9 +17,9 @@ class ZeticGunshotClassifier(
 ) {
     companion object {
         private const val TAG = "ZeticGunshotClassifier"
-        private const val MODEL_NAME = "google/Sound Classification(YAMNET)"
         private const val LABEL_FILE = "yamnet_class_map.csv"
-        const val INPUT_SAMPLES = 48000
+        // Custom uploaded model uses ~1 second window at 16kHz.
+        const val INPUT_SAMPLES = 15600
     }
 
     data class Result(
@@ -52,16 +50,20 @@ class ZeticGunshotClassifier(
                 return@withContext false
             }
 
-            model = ZeticMLangeModel(context, personalKey, MODEL_NAME)
+            val modelName = BuildConfig.ZETIC_MODEL_NAME
+            if (modelName.isBlank()) {
+                Log.e(TAG, "ZETIC_MODEL_NAME is not configured in local.properties")
+                return@withContext false
+            }
+
+            model = ZeticMLangeModel(context, personalKey, modelName)
             modelInputBuffers = model?.getInputBuffers() ?: emptyArray()
             if (modelInputBuffers.isEmpty()) {
                 Log.e(TAG, "Model exposes no input buffers")
                 return@withContext false
             }
-            Log.i(
-                TAG,
-                "Model input[0] byteSize=${modelInputBuffers[0].size()} count=${modelInputBuffers[0].count()}"
-            )
+            val actualInputSize = modelInputBuffers[0].size() / 4
+            Log.i(TAG, "Model=$modelName expects $actualInputSize float samples (${actualInputSize * 4} bytes)")
             Log.i(TAG, "Zetic YAMNet initialized with ${classLabels.size} labels; gunshot indices=$gunshotIndices")
             runSmokeInference()
             true
@@ -89,7 +91,10 @@ class ZeticGunshotClassifier(
             }
             val rms = kotlin.math.sqrt(sumSq / normalizedInput.size)
             Log.d(TAG, "Input audio: size=${normalizedInput.size}, maxAbs=$maxAbs, rms=$rms")
-            val sourceBuffer = ByteBuffer.allocateDirect(expectedCount * 4).order(ByteOrder.nativeOrder())
+            
+            // Copy audio data into model's input buffer
+            val sourceBuffer = java.nio.ByteBuffer.allocateDirect(expectedCount * 4)
+                .order(java.nio.ByteOrder.nativeOrder())
             sourceBuffer.asFloatBuffer().put(normalizedInput)
             sourceBuffer.rewind()
             inputBuffer.copy(data = sourceBuffer)
