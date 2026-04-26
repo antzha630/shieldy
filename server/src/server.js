@@ -204,8 +204,8 @@ function upsertIncident(envelope) {
   addUnique(incident.zones, envelope.body && envelope.alertType === "ALERT:THREAT_DETECTED" ? envelope.body : null);
   addUnique(incident.routes, envelope.body && envelope.alertType === "ALERT:EVACUATE" ? envelope.body : null);
 
-  const latitude = numberOrNull(envelope.latitude) ?? parsed.latitude;
-  const longitude = numberOrNull(envelope.longitude) ?? parsed.longitude;
+  const latitude = numberOrNull(envelope.latitude) ?? numberOrNull(parsed.latitude);
+  const longitude = numberOrNull(envelope.longitude) ?? numberOrNull(parsed.longitude);
   if (latitude !== null && longitude !== null) {
     incident.location = { latitude, longitude };
   }
