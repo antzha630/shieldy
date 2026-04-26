@@ -695,7 +695,7 @@ function generateHeuristicLiveUpdates(incident) {
   }
   push(incident.policeBrief);
 
-  return updates.slice(0, 6);
+  return sanitizeLiveUpdates(updates);
 }
 
 function scoreLiveUpdateReport(message) {
@@ -711,22 +711,84 @@ function scoreLiveUpdateReport(message) {
   return score;
 }
 
+function isPromptLikeLiveUpdate(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return true;
+
+  return [
+    "incident data",
+    "incident json",
+    "valid json",
+    "json array",
+    "output only",
+    "short strings",
+    "constraints:",
+    "input:",
+    "goal:",
+    "concise, actionable",
+    "urgency/confidence",
+    "generate a live-updates feed",
+    "echoshield map live-updates feed",
+    "prioritized by urgency",
+    "do not include markdown",
+    "do not include",
+    "use only",
+    "system_instruction",
+    "generationconfig"
+  ].some((marker) => text.includes(marker));
+}
+
+function sanitizeLiveUpdates(values) {
+  const updates = [];
+  const seen = new Set();
+
+  listValue(values).forEach((value) => {
+    const text = String(value || "")
+      .replace(/^["'\s]+|["'\s]+$/g, "")
+      .replace(/^[-*\d.)\s]+/, "")
+      .trim();
+    if (!text || isPromptLikeLiveUpdate(text)) return;
+
+    const key = text.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    updates.push(text.slice(0, 180));
+  });
+
+  return updates.slice(0, 6);
+}
+
+function extractJsonArrayText(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) return null;
+  if (text.startsWith("[") && text.endsWith("]")) return text;
+
+  const fenced = text.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/i);
+  if (fenced) return fenced[1];
+
+  const start = text.indexOf("[");
+  const end = text.lastIndexOf("]");
+  if (start >= 0 && end > start) {
+    return text.slice(start, end + 1);
+  }
+
+  return null;
+}
+
 function parseLiveUpdatesResponse(rawText) {
-  if (!rawText) return [];
-  const trimmed = rawText.trim();
+  const jsonArrayText = extractJsonArrayText(rawText);
+  if (!jsonArrayText) return [];
+
   try {
-    const parsed = JSON.parse(trimmed);
+    const parsed = JSON.parse(jsonArrayText);
     if (Array.isArray(parsed)) {
-      return parsed.map((x) => String(x || "").trim()).filter(Boolean).slice(0, 6);
+      return sanitizeLiveUpdates(parsed);
     }
   } catch {
-    // Fall through to line parsing.
+    return [];
   }
-  return trimmed
-    .split("\n")
-    .map((line) => line.replace(/^[-*\d.\s]+/, "").trim())
-    .filter(Boolean)
-    .slice(0, 6);
+
+  return [];
 }
 
 async function generateAgentLiveUpdates(incident) {
@@ -766,6 +828,10 @@ async function generateAgentLiveUpdates(incident) {
       ?.map((part) => part?.text || "")
       .join("\n")
       .trim();
+    if (isPromptEchoResponse(rawText) || isPromptLikeLiveUpdate(rawText)) {
+      throw new Error("Model echoed live-update prompt instead of JSON");
+    }
+
     const parsed = parseLiveUpdatesResponse(rawText);
     if (parsed.length) {
       console.info(`[relay] Live updates model=${model}`);
@@ -780,7 +846,7 @@ async function generateAgentLiveUpdates(incident) {
 
 async function refreshIncidentLiveUpdates(incident) {
   const updates = await generateAgentLiveUpdates(incident);
-  incident.liveUpdates = updates;
+  incident.liveUpdates = sanitizeLiveUpdates(updates);
   incident.updatedAt = nowIso();
 }
 
@@ -905,8 +971,9 @@ async function sendSendGridEmail(incident, message) {
 }
 
 function publicIncident(incident) {
-  const effectiveLiveUpdates = Array.isArray(incident.liveUpdates) && incident.liveUpdates.length
-    ? incident.liveUpdates
+  const storedLiveUpdates = sanitizeLiveUpdates(incident.liveUpdates || []);
+  const effectiveLiveUpdates = storedLiveUpdates.length
+    ? storedLiveUpdates
     : generateHeuristicLiveUpdates(incident);
   return {
     ...incident,
