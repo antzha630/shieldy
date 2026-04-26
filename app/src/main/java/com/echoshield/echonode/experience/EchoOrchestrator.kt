@@ -235,7 +235,10 @@ class EchoOrchestrator(
         meshGateway.broadcastThreat(_uiState.value.threatZone)
     }
 
-    fun triggerEvacuate(route: String = DEFAULT_EVACUATION_ROUTE) {
+    fun triggerEvacuate(
+        route: String = DEFAULT_EVACUATION_ROUTE,
+        broadcastToPeers: Boolean = false
+    ) {
         val selectedRoute = if (
             route == DEFAULT_EVACUATION_ROUTE &&
             _uiState.value.evacuationRoute.isNotBlank()
@@ -249,12 +252,14 @@ class EchoOrchestrator(
             appState = AppState.EVACUATE,
             evacuationRoute = selectedRoute
         )
-        meshGateway.broadcastEvacuate(selectedRoute)
+        if (broadcastToPeers) {
+            meshGateway.broadcastEvacuate(selectedRoute)
+        }
     }
 
-    fun toggleBarricadeEvacuate() {
+    fun toggleBarricadeEvacuate(broadcastToPeers: Boolean = false) {
         when (_uiState.value.appState) {
-            AppState.BARRICADE -> triggerEvacuate()
+            AppState.BARRICADE -> triggerEvacuate(broadcastToPeers = broadcastToPeers)
             AppState.EVACUATE -> transitionToBarricade()
             AppState.LISTENING -> transitionToBarricade()
             AppState.LOCATION_CONFIRMATION -> transitionToBarricade()
@@ -263,7 +268,7 @@ class EchoOrchestrator(
         }
     }
 
-    fun resetAlert() {
+    fun resetAlert(broadcastToPeers: Boolean = false) {
         _uiState.value = _uiState.value.copy(
             appState = AppState.LISTENING,
             locationConfirmed = false,
@@ -273,7 +278,9 @@ class EchoOrchestrator(
             roomNumber = "",
             incidentNotes = ""
         )
-        meshGateway.broadcastAllClear()
+        if (broadcastToPeers) {
+            meshGateway.broadcastAllClear()
+        }
     }
 
     fun confirmLocation(isConfirmed: Boolean) {
@@ -308,16 +315,20 @@ class EchoOrchestrator(
     }
 
     fun submitIncidentReport() {
-        meshGateway.broadcastThreat(_uiState.value.threatZone)
-        transitionToBarricade()
+        // Status/report submission should not create or rebroadcast a threat alert.
+        // The user is already in incident mode because a detection/trigger happened.
+        // Keep the current flow state unchanged.
     }
 
     fun quickBarricade() {
         transitionToBarricade()
     }
 
-    fun quickEvacuate(route: String = DEFAULT_EVACUATION_ROUTE) {
-        triggerEvacuate(route)
+    fun quickEvacuate(
+        route: String = DEFAULT_EVACUATION_ROUTE,
+        broadcastToPeers: Boolean = false
+    ) {
+        triggerEvacuate(route, broadcastToPeers)
     }
 
     fun goBackToLocation() {

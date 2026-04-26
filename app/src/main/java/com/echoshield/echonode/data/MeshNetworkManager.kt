@@ -53,7 +53,7 @@ class MeshNetworkManager(context: Context) {
         private const val DUTY_REFRESH_MS = 15_000L
         private const val VOTE_WINDOW_MS = 5_000L
         private const val MESH_RETRY_INTERVAL_MS = 5_000L
-        private const val DEFAULT_CONFIRMATION_THRESHOLD = 2
+        private const val DEFAULT_CONFIRMATION_THRESHOLD = 1
         private const val PREFS_NAME = "echoshield_mesh"
         private const val PREF_LOCAL_NODE_ID = "local_node_id"
 
