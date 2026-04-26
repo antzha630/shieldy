@@ -809,11 +809,11 @@ private fun IncidentMapTab(
 
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(scrollState),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         // ── Map ──────────────────────────────────────────────────────────────
         Card(
-            modifier = Modifier.fillMaxWidth().height(260.dp),
+            modifier = Modifier.fillMaxWidth().height(320.dp),
             colors = CardDefaults.cardColors(containerColor = CardWhite),
             shape = RoundedCornerShape(16.dp)
         ) {
@@ -908,6 +908,8 @@ private fun IncidentMapTab(
             }
         }
 
+        Spacer(modifier = Modifier.height(6.dp))
+
         // ── Proximity-based action card ───────────────────────────────────────
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -967,6 +969,8 @@ private fun IncidentMapTab(
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         // ── Live updates from server authority messages ────────────────────────
         Card(

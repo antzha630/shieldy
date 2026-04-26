@@ -16,12 +16,11 @@ const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || "";
 const SENDGRID_FROM = process.env.SENDGRID_FROM || "";
 const DISPATCH_EMAIL_TO = process.env.DISPATCH_EMAIL_TO || "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
-// Use actual Gemini API model names (not Vertex AI / Gemma names which require different endpoint)
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const GEMINI_MODEL_FALLBACKS = [
-  "gemini-2.0-flash",
-  "gemini-1.5-flash",
-  "gemini-1.5-pro"
+  "gemini-2.5-flash",
+  "gemini-2.0-flash-001",
+  "gemini-1.5-flash"
 ];
 
 const incidents = new Map();
@@ -842,20 +841,23 @@ async function generateAgentLiveUpdates(incident) {
     snapshot.authorityMessages?.length ? `Reports: ${JSON.stringify(snapshot.authorityMessages.slice(-3))}` : ""
   ].filter(Boolean).join("\n");
 
-  try {
-    const { model, payload } = await generateWithModelFallback(() => ({
+  const askModel = (userPrompt, maxOutputTokens = 200) => generateWithModelFallback(() => ({
         systemInstruction: {
           parts: [{
             text: "Return ONLY a JSON array of strings. No other text, no explanation, no markdown."
           }]
         },
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
         generationConfig: {
           temperature: 0.1,
           topP: 0.8,
-          maxOutputTokens: 200
+          maxOutputTokens,
+          responseMimeType: "application/json"
         }
       }));
+
+  try {
+    const { model, payload } = await askModel(prompt, 260);
     const rawText = payload?.candidates?.[0]?.content?.parts
       ?.map((part) => part?.text || "")
       .join("\n")
@@ -868,12 +870,36 @@ async function generateAgentLiveUpdates(incident) {
       return parsed;
     }
 
-    // Check if response is just echoing prompt
-    if (isPromptEchoResponse(rawText) || isPromptLikeLiveUpdate(rawText)) {
+    // One retry with a tighter prompt to avoid partial/echo output.
+    const retryPrompt = [
+      "Return EXACTLY 4 JSON strings.",
+      "No intro text. No markdown. Only JSON array output.",
+      "Use only concrete facts from incident data.",
+      "If uncertain, include one brief uncertainty line.",
+      "",
+      "Incident JSON:",
+      JSON.stringify(snapshot)
+    ].join("\n");
+
+    const retry = await askModel(retryPrompt, 180);
+    const retryRawText = retry?.payload?.candidates?.[0]?.content?.parts
+      ?.map((part) => part?.text || "")
+      .join("\n")
+      .trim();
+    const retryParsed = parseLiveUpdatesResponse(retryRawText);
+    if (retryParsed.length) {
+      console.info(`[relay] Live updates model=${retry.model} retry=1 count=${retryParsed.length}`);
+      return retryParsed;
+    }
+
+    if (isPromptEchoResponse(rawText) || isPromptLikeLiveUpdate(rawText) ||
+        isPromptEchoResponse(retryRawText) || isPromptLikeLiveUpdate(retryRawText)) {
       throw new Error("Model echoed prompt instead of JSON array");
     }
 
-    throw new Error(`No valid JSON array in response: ${String(rawText || "").slice(0, 120)}`);
+    throw new Error(
+      `No valid JSON array in response: ${String((retryRawText || rawText || "")).slice(0, 120)}`
+    );
   } catch (error) {
     console.warn("[relay] Gemini live-updates failed, fallback used:", error.message);
     return generateHeuristicLiveUpdates(incident);
