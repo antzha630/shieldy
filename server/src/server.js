@@ -811,20 +811,30 @@ function parseLiveUpdatesResponse(rawText) {
   return [];
 }
 
+const LIVE_UPDATES_RESPONSE_SCHEMA = {
+  type: "array",
+  minItems: 3,
+  maxItems: 6,
+  items: {
+    type: "string",
+    description: "A concise, user-facing emergency update. No bullets, markdown, JSON labels, or prompt text."
+  }
+};
+
 async function generateAgentLiveUpdates(incident) {
   if (!GEMINI_API_KEY) {
     return generateHeuristicLiveUpdates(incident);
   }
 
   const prompt = [
-    "You are generating the EchoShield map live-updates feed.",
-    "From the incident JSON below, output ONLY a JSON array of 3-6 short strings.",
-    "Each string should be concise, actionable, and prioritized by urgency and confidence.",
+    "Generate the EchoShield map live-updates feed from this incident.",
+    "Return 3-6 short user-facing update strings.",
+    "Each string should be concise, actionable, and prioritized by urgency/confidence.",
     "Prioritize cross-user crowd reports that contain injury status, shooter location/direction, blocked exits, and room-level situational updates.",
     "Prefer corroborated facts from multiple users over single uncertain claims.",
     "If facts conflict, include the safest conservative instruction and mark uncertainty briefly.",
     "Prefer actionable updates over generic acknowledgements.",
-    "Do not include markdown, labels, bullets, or explanation outside JSON.",
+    "Do not repeat instructions, schema, or incident JSON.",
     "",
     "INCIDENT DATA (JSON):",
     JSON.stringify(incidentSnapshotForAgent(incident))
@@ -834,14 +844,16 @@ async function generateAgentLiveUpdates(incident) {
     const { model, payload } = await generateWithModelFallback(() => ({
         system_instruction: {
           parts: [{
-            text: "Return only valid JSON array output. Never restate instructions or incident JSON."
+            text: "You produce structured emergency live updates. Return only the requested JSON value."
           }]
         },
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
           temperature: 0.15,
           topP: 0.9,
-          maxOutputTokens: 180
+          maxOutputTokens: 180,
+          responseMimeType: "application/json",
+          responseJsonSchema: LIVE_UPDATES_RESPONSE_SCHEMA
         }
       }));
     const rawText = payload?.candidates?.[0]?.content?.parts
@@ -857,7 +869,7 @@ async function generateAgentLiveUpdates(incident) {
       console.info(`[relay] Live updates model=${model}`);
       return parsed;
     }
-    throw new Error("Gemini returned no usable live updates");
+    throw new Error(`Gemini returned no usable live updates: ${String(rawText || "").slice(0, 220)}`);
   } catch (error) {
     console.warn("[relay] Gemini live-updates failed, fallback used:", error.message);
     return generateHeuristicLiveUpdates(incident);
