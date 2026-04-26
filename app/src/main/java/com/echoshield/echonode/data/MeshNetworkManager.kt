@@ -437,7 +437,7 @@ class MeshNetworkManager(context: Context) {
                 return
             }
             message.startsWith(PAYLOAD_RESPONSE_TRIGGER) -> {
-                handleResponseTrigger(message)
+                handleResponseTrigger(sourceEndpointId, message)
                 return
             }
         }
@@ -945,6 +945,7 @@ class MeshNetworkManager(context: Context) {
             }
 
             broadcastResponseTrigger(session)
+            publishResponseTriggerToCloud(trigger, sourceEndpointId = null)
             pendingVoteSessions.remove(sessionId)
             Log.w(TAG, "RESPONSE TRIGGERED! session=$sessionId confirmedBy=$confirmedNodes")
         }
@@ -973,7 +974,7 @@ class MeshNetworkManager(context: Context) {
         sendPayloadToAllEndpoints(payload)
     }
 
-    private fun handleResponseTrigger(message: String) {
+    private fun handleResponseTrigger(sourceEndpointId: String?, message: String) {
         val parts = message.split("|")
         if (parts.size < 6) return
 
@@ -1000,8 +1001,71 @@ class MeshNetworkManager(context: Context) {
             _responseTriggered.emit(trigger)
         }
 
+        publishResponseTriggerToCloud(trigger, sourceEndpointId)
         pendingVoteSessions.remove(sessionId)
         Log.w(TAG, "RESPONSE_TRIGGER received: session=$sessionId at ($latitude, $longitude)")
+    }
+
+    private fun publishResponseTriggerToCloud(trigger: ResponseTrigger, sourceEndpointId: String?) {
+        val assignment = _dutyAssignment.value
+        if (!cloudRelayClient.isEnabled || !assignment.cloudRelayDuty) {
+            return
+        }
+
+        val sourceNodeId = sourceEndpointId?.let { endpointId ->
+            connectedEndpoints[endpointId] ?: pendingEndpointNames[endpointId] ?: endpointId
+        } ?: localEndpointName
+
+        val payload = buildString {
+            append(PAYLOAD_RESPONSE_TRIGGER)
+            append("|")
+            append(trigger.sessionId)
+            append("|")
+            append(trigger.latitude)
+            append("|")
+            append(trigger.longitude)
+            append("|")
+            append(trigger.confirmedByNodes.joinToString(","))
+            append("|")
+            append(trigger.timestamp)
+        }
+
+        val envelope = CloudRelayEnvelope(
+            protocolVersion = 1,
+            deviceId = localEndpointName,
+            messageId = "response:${trigger.sessionId}",
+            alertType = PAYLOAD_RESPONSE_TRIGGER,
+            body = null,
+            payload = payload,
+            sourceNodeId = sourceNodeId,
+            observedAtMs = System.currentTimeMillis(),
+            connectedPeerCount = connectedEndpoints.size,
+            leaderNodeId = assignment.leaderNodeId,
+            dutyEpoch = assignment.epoch,
+            sessionId = trigger.sessionId,
+            latitude = trigger.latitude,
+            longitude = trigger.longitude,
+            confirmedByNodes = trigger.confirmedByNodes
+        )
+
+        scope.launch(Dispatchers.IO) {
+            when (val result = cloudRelayClient.publishAlert(envelope)) {
+                CloudRelayResult.Delivered -> {
+                    Log.d(TAG, "Cloud response relay delivered ${trigger.sessionId}")
+                }
+
+                CloudRelayResult.Disabled -> {
+                    // Disabled clients are a normal local-only operating mode.
+                }
+
+                is CloudRelayResult.Failed -> {
+                    Log.w(TAG, "Cloud response relay failed for ${trigger.sessionId}: ${result.reason}", result.throwable)
+                    if (connectedEndpoints.isEmpty()) {
+                        _meshStatus.value = MeshStatus.ERROR
+                    }
+                }
+            }
+        }
     }
 
     private fun startVoteCleanup() {

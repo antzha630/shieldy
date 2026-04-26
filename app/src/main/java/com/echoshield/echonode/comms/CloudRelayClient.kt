@@ -41,7 +41,11 @@ data class CloudRelayEnvelope(
     val observedAtMs: Long,
     val connectedPeerCount: Int,
     val leaderNodeId: String,
-    val dutyEpoch: Long
+    val dutyEpoch: Long,
+    val sessionId: String? = null,
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+    val confirmedByNodes: List<String> = emptyList()
 )
 
 sealed class CloudRelayResult {
@@ -98,7 +102,11 @@ class RetrofitCloudRelayClient private constructor(
                     observedAtMs = envelope.observedAtMs,
                     connectedPeerCount = envelope.connectedPeerCount,
                     leaderNodeId = envelope.leaderNodeId,
-                    dutyEpoch = envelope.dutyEpoch
+                    dutyEpoch = envelope.dutyEpoch,
+                    sessionId = envelope.sessionId,
+                    latitude = envelope.latitude,
+                    longitude = envelope.longitude,
+                    confirmedByNodes = envelope.confirmedByNodes
                 )
             )
             if (response.isSuccessful) {
@@ -176,5 +184,9 @@ internal data class CloudRelayAlertRequest(
     val observedAtMs: Long,
     val connectedPeerCount: Int,
     val leaderNodeId: String,
-    val dutyEpoch: Long
+    val dutyEpoch: Long,
+    val sessionId: String?,
+    val latitude: Double?,
+    val longitude: Double?,
+    val confirmedByNodes: List<String>
 )

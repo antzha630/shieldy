@@ -791,6 +791,31 @@ private fun IncidentMapTab(
             shape = RoundedCornerShape(14.dp)
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
+                SectionLabel("Route Guidance")
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = evacuationRoute.ifBlank { "Awaiting confirmed route" },
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (evacuationRoute.isBlank()) SecondaryText else AccentGreen
+                )
+                if (threatZone.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = threatZone,
+                        fontSize = 13.sp,
+                        color = SecondaryText
+                    )
+                }
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = CardWhite),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
                 SectionLabel("Live Updates")
                 Spacer(modifier = Modifier.height(8.dp))
                 // TODO: Replace these hardcoded notifications with dynamic alert feed data.

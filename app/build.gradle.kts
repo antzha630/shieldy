@@ -13,6 +13,8 @@ val localProperties = Properties().apply {
 }
 val mapsApiKey = (localProperties.getProperty("MAPS_API_KEY") ?: "").trim()
 val zeticPersonalKey = (localProperties.getProperty("ZETIC_PERSONAL_KEY") ?: "").trim()
+val cloudRelayUrl = (localProperties.getProperty("CLOUD_RELAY_URL") ?: "").trim()
+val cloudRelayApiKey = (localProperties.getProperty("CLOUD_RELAY_API_KEY") ?: "").trim()
 
 android {
     namespace = "com.echoshield.echonode"
@@ -25,6 +27,8 @@ android {
         versionCode = 1
         versionName = "1.0.0-mvp"
         manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
+        manifestPlaceholders["CLOUD_RELAY_URL"] = cloudRelayUrl
+        manifestPlaceholders["CLOUD_RELAY_API_KEY"] = cloudRelayApiKey
 
         buildConfigField("String", "ZETIC_KEY", "\"$zeticPersonalKey\"")
 

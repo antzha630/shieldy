@@ -28,6 +28,7 @@ class EchoOrchestrator(
         private const val DISTANCE_VERY_CLOSE_M = 50.0
         private const val DISTANCE_CLOSE_M = 150.0
         private const val DISTANCE_MEDIUM_M = 500.0
+        private const val DEFAULT_EVACUATION_ROUTE = "SOUTH - EXIT 4"
     }
 
     private val _uiState = MutableStateFlow(EchoUiState())
@@ -119,7 +120,9 @@ class EchoOrchestrator(
         )
 
         val directionFromThreat = bearingToDirection(bearing)
-        val relativeMessage = generateDistanceBasedMessage(distanceMeters, directionFromThreat)
+        val escapeDirection = bearingToCardinalDirection(bearing)
+        val evacuationRoute = generateEvacuationRoute(distanceMeters, escapeDirection)
+        val relativeMessage = generateDistanceBasedMessage(distanceMeters, directionFromThreat, evacuationRoute)
 
         val threatZone = buildString {
             append("Threat confirmed by ${trigger.confirmedByNodes.size} devices")
@@ -131,27 +134,40 @@ class EchoOrchestrator(
         _uiState.value = _uiState.value.copy(
             appState = AppState.BARRICADE,
             threatZone = threatZone,
+            evacuationRoute = evacuationRoute,
             relativeLocation = relativeMessage
         )
     }
 
-    private fun generateDistanceBasedMessage(distanceMeters: Double, direction: String): String {
+    private fun generateDistanceBasedMessage(
+        distanceMeters: Double,
+        direction: String,
+        evacuationRoute: String
+    ): String {
         return when {
             distanceMeters < DISTANCE_VERY_CLOSE_M -> {
-                "IMMEDIATE DANGER - Threat very close! Take cover NOW!"
+                "IMMEDIATE DANGER - Threat very close! Take cover NOW. If an exit is clear, $evacuationRoute."
             }
             distanceMeters < DISTANCE_CLOSE_M -> {
                 "HIGH ALERT - Threat nearby (~${distanceMeters.roundToInt()}m $direction). " +
-                    "Barricade immediately, stay away from windows."
+                    "Barricade immediately. If directed to move, $evacuationRoute."
             }
             distanceMeters < DISTANCE_MEDIUM_M -> {
                 "ALERT - Threat detected ~${distanceMeters.roundToInt()}m $direction. " +
-                    "Shelter in place, lock doors, silence phones."
+                    "Shelter in place unless a clear route opens. Recommended direction: $evacuationRoute."
             }
             else -> {
                 "CAUTION - Threat reported ~${distanceMeters.roundToInt()}m $direction. " +
-                    "Stay alert, prepare to shelter if situation escalates."
+                    "Stay alert. Preferred movement direction: $evacuationRoute."
             }
+        }
+    }
+
+    private fun generateEvacuationRoute(distanceMeters: Double, escapeDirection: String): String {
+        return if (distanceMeters > 0) {
+            "Move $escapeDirection away from threat"
+        } else {
+            "Move away from last reported threat"
         }
     }
 
@@ -193,6 +209,15 @@ class EchoOrchestrator(
         }
     }
 
+    private fun bearingToCardinalDirection(bearing: Double): String {
+        return when {
+            bearing < 45.0 || bearing >= 315.0 -> "NORTH"
+            bearing < 135.0 -> "EAST"
+            bearing < 225.0 -> "SOUTH"
+            else -> "WEST"
+        }
+    }
+
     fun setConfirmationThreshold(threshold: Int) {
         meshGateway.setConfirmationThreshold(threshold)
     }
@@ -210,12 +235,21 @@ class EchoOrchestrator(
         meshGateway.broadcastThreat(_uiState.value.threatZone)
     }
 
-    fun triggerEvacuate(route: String = "SOUTH - EXIT 4") {
+    fun triggerEvacuate(route: String = DEFAULT_EVACUATION_ROUTE) {
+        val selectedRoute = if (
+            route == DEFAULT_EVACUATION_ROUTE &&
+            _uiState.value.evacuationRoute.isNotBlank()
+        ) {
+            _uiState.value.evacuationRoute
+        } else {
+            route
+        }
+
         _uiState.value = _uiState.value.copy(
             appState = AppState.EVACUATE,
-            evacuationRoute = route
+            evacuationRoute = selectedRoute
         )
-        meshGateway.broadcastEvacuate(route)
+        meshGateway.broadcastEvacuate(selectedRoute)
     }
 
     fun toggleBarricadeEvacuate() {
@@ -282,7 +316,7 @@ class EchoOrchestrator(
         transitionToBarricade()
     }
 
-    fun quickEvacuate(route: String = "SOUTH - EXIT 4") {
+    fun quickEvacuate(route: String = DEFAULT_EVACUATION_ROUTE) {
         triggerEvacuate(route)
     }
 
@@ -301,7 +335,7 @@ class EchoOrchestrator(
                 _uiState.value = _uiState.value.copy(appState = AppState.LISTENING)
             }
             payload.startsWith("ALERT:EVACUATE") -> {
-                val route = payload.split("|").getOrNull(2) ?: "SOUTH - EXIT 4"
+                val route = payload.split("|").getOrNull(2) ?: DEFAULT_EVACUATION_ROUTE
                 _uiState.value = _uiState.value.copy(
                     appState = AppState.EVACUATE,
                     evacuationRoute = route
