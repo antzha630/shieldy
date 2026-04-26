@@ -543,6 +543,18 @@ function sanitizeEchoedAgentText(rawText) {
   return filtered.join("\n").trim();
 }
 
+function forceAssistantAnswerFallback(rawText) {
+  const cleaned = sanitizeEchoedAgentText(rawText);
+  if (!cleaned) return "";
+  const lines = cleaned
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^(analysis|constraint|incident data|input|goal|json)\b/i.test(line))
+    .slice(0, 6);
+  return lines.join("\n").trim().slice(0, 1800);
+}
+
 function orderedModelCandidates() {
   const seen = new Set();
   const ordered = [];
@@ -699,12 +711,19 @@ async function generateAgentReply(incident, userMessage) {
       .trim();
     lastRawText = retryText || lastRawText;
     const retryCleaned = sanitizeEchoedAgentText(retryText);
-    if (!retryCleaned || isPromptEchoResponse(retryCleaned)) {
-      throw new Error("Model echoed prompt/context instead of returning answer");
+    if (retryCleaned && !isPromptEchoResponse(retryCleaned)) {
+      console.info(`[relay] Agent reply model=${retryResult.model} retry=1`);
+      return retryCleaned.slice(0, 1800);
     }
 
-    console.info(`[relay] Agent reply model=${retryResult.model} retry=1`);
-    return retryCleaned.slice(0, 1800);
+    // Last-ditch salvage: keep whatever user-facing lines remain after sanitization.
+    const salvaged = forceAssistantAnswerFallback(retryText || text);
+    if (salvaged) {
+      console.info(`[relay] Agent reply model=${retryResult.model} retry=1 salvaged=1`);
+      return salvaged;
+    }
+
+    throw new Error("Model echoed prompt/context instead of returning answer");
   } catch (error) {
     logGeminiFailure("Gemini reply", incident.id, error, { stage: "chat", rawText: lastRawText });
     console.warn("[relay] Gemini reply fallback=heuristic");
@@ -836,19 +855,42 @@ function extractJsonArrayText(rawText) {
 
 function parseLiveUpdatesResponse(rawText) {
   const jsonArrayText = extractJsonArrayText(rawText);
-  if (!jsonArrayText) return [];
+  if (!jsonArrayText) {
+    return parseLiveUpdatesFromPlainText(rawText);
+  }
 
-  let lastRawText = "";
   try {
     const parsed = JSON.parse(jsonArrayText);
     if (Array.isArray(parsed)) {
       return sanitizeLiveUpdates(parsed);
     }
   } catch {
-    return [];
+    // Recover partial/truncated JSON arrays by extracting quoted phrases.
+    return parseLiveUpdatesFromPartialJson(rawText);
   }
 
-  return [];
+  return parseLiveUpdatesFromPlainText(rawText);
+}
+
+function parseLiveUpdatesFromPartialJson(rawText) {
+  const quoted = [];
+  const text = String(rawText || "");
+  const regex = /"([^"\n]{4,180})"/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    quoted.push(match[1]);
+    if (quoted.length >= 8) break;
+  }
+  return sanitizeLiveUpdates(quoted);
+}
+
+function parseLiveUpdatesFromPlainText(rawText) {
+  const lines = String(rawText || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
+    .filter(Boolean);
+  return sanitizeLiveUpdates(lines);
 }
 
 const LIVE_UPDATES_RESPONSE_SCHEMA = {
@@ -932,6 +974,13 @@ async function generateAgentLiveUpdates(incident) {
     if (retryParsed.length) {
       console.info(`[relay] Live updates model=${retry.model} retry=1 count=${retryParsed.length}`);
       return retryParsed;
+    }
+
+    // Last-ditch salvage from partial JSON fragments.
+    const salvaged = parseLiveUpdatesFromPartialJson(retryRawText || rawText);
+    if (salvaged.length) {
+      console.info(`[relay] Live updates model=${retry.model} retry=1 salvaged=${salvaged.length}`);
+      return salvaged;
     }
 
     if (isPromptEchoResponse(rawText) || isPromptLikeLiveUpdate(rawText) ||
