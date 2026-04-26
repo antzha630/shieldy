@@ -15,6 +15,7 @@ Open:
 
 - `http://localhost:8787/health`
 - `http://localhost:8787/dashboard`
+- `http://localhost:8787/dispatch`
 - `http://localhost:8787/v1/incidents`
 
 Optional bearer token:
@@ -47,6 +48,29 @@ npm start
 ```
 
 If neither provider is configured, the dashboard still creates a dispatch-ready police/medical brief and records that notification was skipped.
+
+## Simulated Authority Chat
+
+For the safest and fastest hackathon demo, use the built-in dispatch simulator instead of real SMS/email.
+
+Open:
+
+```text
+http://localhost:8787/dispatch
+```
+
+When a `RESPONSE:TRIGGER` packet arrives, the server automatically seeds the incident with simulated authority messages:
+
+- EchoShield Dispatch opens the incident.
+- Police Dispatcher assigns a response unit.
+- EMS Coordinator requests injured counts and room/location details.
+- Police Dispatcher gives shelter/route guidance.
+
+Judges can type as a dispatcher in the browser, and messages are appended to the incident log through:
+
+```text
+POST /v1/incidents/:id/authority-messages
+```
 
 ## Android Config
 
@@ -90,6 +114,8 @@ curl -X POST http://localhost:8787/v1/mesh/alerts \
 - `GET /v1/incidents/latest`: latest active incident.
 - `GET /v1/incidents/:id`: one incident.
 - `POST /v1/incidents/:id/notes`: future law/medical note intake.
+- `POST /v1/incidents/:id/authority-messages`: simulated authority chat.
 - `GET /dashboard`: simple auto-refresh responder console.
+- `GET /dispatch`: simulated police/EMS console and chat.
 
 This is intentionally not a production emergency-services integration. It is a hackathon-safe stub that creates the exact object a real dispatch integration or agentic summarizer would consume.

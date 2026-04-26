@@ -160,12 +160,14 @@ function createIncident(id, observedAtMs) {
     confirmedByNodes: [],
     observations: [],
     notes: [],
+    authorityMessages: [],
     location: null,
     dispatchRecommended: false,
     policeBrief: "No incident data yet.",
     medicalBrief: "No medical notes received yet.",
     recommendedAction: "Monitor for peer confirmation.",
     dispatchNotifiedAt: null,
+    authoritySeededAt: null,
     notificationAttempts: []
   };
 }
@@ -220,6 +222,7 @@ function upsertIncident(envelope) {
   incident.medicalBrief = medicalBriefFor(incident);
 
   incidents.set(id, incident);
+  seedAuthorityMessages(incident);
   scheduleDispatchNotification(incident);
   return { incident, duplicate: isDuplicate };
 }
@@ -283,6 +286,52 @@ function medicalBriefFor(incident) {
   const companions = incident.notes.reduce((sum, note) => sum + (Number(note.companionsCount) || 0), 0);
   if (!incident.notes.length) return "No medical notes received yet.";
   return `Reports mention ${injured} injured person(s) and ${companions} companion(s) near users who submitted notes.`;
+}
+
+function seedAuthorityMessages(incident) {
+  if (incident.status !== "CONFIRMED_RESPONSE" || incident.authoritySeededAt) {
+    return;
+  }
+
+  incident.authoritySeededAt = nowIso();
+  addAuthorityMessage(incident, {
+    sender: "EchoShield Dispatch",
+    role: "system",
+    message: "Confirmed multi-device gunshot response received. Incident opened in dispatch console."
+  });
+  addAuthorityMessage(incident, {
+    sender: "Police Dispatcher",
+    role: "authority",
+    message: "Nearest response unit assigned. Continue collecting location and safety reports."
+  });
+  addAuthorityMessage(incident, {
+    sender: "EMS Coordinator",
+    role: "medical",
+    message: "Medical staging requested. Send injured counts and room/location notes as available."
+  });
+  addAuthorityMessage(incident, {
+    sender: "Police Dispatcher",
+    role: "authority",
+    message: "Advise occupants to shelter unless a verified route away from the threat is available."
+  });
+}
+
+function addAuthorityMessage(incident, input) {
+  const message = {
+    id: crypto.randomUUID(),
+    at: nowIso(),
+    sender: String(input.sender || "Dispatcher").slice(0, 80),
+    role: String(input.role || "authority").slice(0, 40),
+    message: String(input.message || "").trim().slice(0, 2000)
+  };
+
+  if (!message.message) {
+    return null;
+  }
+
+  incident.authorityMessages.push(message);
+  incident.updatedAt = nowIso();
+  return message;
 }
 
 function dispatchMessageFor(incident) {
@@ -409,8 +458,10 @@ function publicIncident(incident) {
   return {
     ...incident,
     observationCount: incident.observations.length,
+    authorityMessageCount: incident.authorityMessages.length,
     observations: incident.observations.slice(-25),
-    notes: incident.notes.slice(-25)
+    notes: incident.notes.slice(-25),
+    authorityMessages: incident.authorityMessages.slice(-50)
   };
 }
 
@@ -493,6 +544,41 @@ async function handleNote(req, res, incidentId) {
   });
 }
 
+async function handleAuthorityMessage(req, res, incidentId) {
+  const incident = incidents.get(incidentId);
+  if (!incident) {
+    json(res, 404, { ok: false, error: "Incident not found" });
+    return;
+  }
+
+  let input;
+  try {
+    input = await readJson(req);
+  } catch (error) {
+    json(res, 400, { ok: false, error: `Invalid JSON: ${error.message}` });
+    return;
+  }
+
+  const message = addAuthorityMessage(incident, {
+    sender: input.sender || "Demo Dispatcher",
+    role: input.role || "authority",
+    message: input.message
+  });
+
+  if (!message) {
+    json(res, 422, { ok: false, error: "Message is required" });
+    return;
+  }
+
+  incidents.set(incident.id, incident);
+  json(res, 202, {
+    ok: true,
+    incidentId: incident.id,
+    message,
+    authorityMessages: incident.authorityMessages.slice(-50)
+  });
+}
+
 function dashboardHtml() {
   const rows = [...incidents.values()]
     .sort((a, b) => b.lastObservedAtMs - a.lastObservedAtMs)
@@ -523,9 +609,151 @@ function dashboardHtml() {
 <body>
   <main>
     <h1>EchoShield Relay Console</h1>
-    <p>${incidents.size} incident(s) tracked. Refreshes every 5 seconds.</p>
+    <p>${incidents.size} incident(s) tracked. Refreshes every 5 seconds. <a href="/dispatch">Open dispatch chat</a></p>
     ${rows || "<p>No incidents yet.</p>"}
   </main>
+</body>
+</html>`;
+}
+
+function dispatchHtml(selectedIncidentId = null) {
+  const sortedIncidents = [...incidents.values()].sort((a, b) => b.lastObservedAtMs - a.lastObservedAtMs);
+  const selected = selectedIncidentId
+    ? incidents.get(selectedIncidentId)
+    : latestActiveIncident() || sortedIncidents[0] || null;
+
+  const incidentOptions = sortedIncidents.map((incident) => `
+    <a class="${selected?.id === incident.id ? "selected" : ""}" href="/dispatch?incident=${encodeURIComponent(incident.id)}">
+      <strong>${escapeHtml(incident.status)}</strong>
+      <span>${escapeHtml(incident.id)}</span>
+    </a>
+  `).join("");
+
+  const chatRows = selected?.authorityMessages.map((message) => `
+    <div class="message ${escapeHtml(message.role)}">
+      <div class="meta">${escapeHtml(message.sender)} · ${escapeHtml(message.role)} · ${escapeHtml(message.at)}</div>
+      <p>${escapeHtml(message.message)}</p>
+    </div>
+  `).join("") || "";
+
+  const notesRows = selected?.notes.slice(-6).map((note) => `
+    <li><strong>${escapeHtml(note.safetyStatus)}</strong> ${escapeHtml(note.roomNumber || "unknown room")} · injured ${note.injuredCount}: ${escapeHtml(note.note || "No note")}</li>
+  `).join("") || "";
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EchoShield Dispatch Console</title>
+  <style>
+    :root { color-scheme: light; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: #eef1f5; color: #121820; }
+    header { background: #121820; color: white; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
+    header a { color: #9ad0ff; }
+    main { display: grid; grid-template-columns: 280px 1fr 360px; min-height: calc(100vh - 64px); }
+    nav { border-right: 1px solid #d5dae3; background: white; padding: 16px; }
+    nav a { display: block; color: #121820; text-decoration: none; padding: 12px; border-radius: 8px; margin-bottom: 8px; border: 1px solid #e3e6ec; }
+    nav a.selected { border-color: #1b73e8; background: #eaf2ff; }
+    nav span { display: block; color: #5c6777; font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+    section, aside { padding: 18px; }
+    .panel { background: white; border: 1px solid #dfe4ec; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+    .chat { height: 54vh; overflow: auto; background: #f8fafc; border-radius: 10px; padding: 12px; border: 1px solid #e3e6ec; }
+    .message { background: white; border: 1px solid #dfe4ec; border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+    .message.authority { border-left: 5px solid #1b73e8; }
+    .message.medical { border-left: 5px solid #1c9b57; }
+    .message.system { border-left: 5px solid #7b61ff; }
+    .meta { color: #5c6777; font-size: 12px; margin-bottom: 6px; }
+    textarea, input { box-sizing: border-box; width: 100%; border: 1px solid #ccd3de; border-radius: 8px; padding: 10px; font: inherit; }
+    textarea { min-height: 90px; resize: vertical; }
+    button { border: 0; border-radius: 8px; background: #1b73e8; color: white; padding: 11px 14px; font-weight: 700; cursor: pointer; }
+    button.secondary { background: #455469; }
+    .brief { line-height: 1.45; }
+    .empty { color: #5c6777; }
+    @media (max-width: 980px) { main { grid-template-columns: 1fr; } nav { border-right: 0; border-bottom: 1px solid #d5dae3; } }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>EchoShield Simulated Dispatch</strong>
+    <a href="/dashboard">Relay dashboard</a>
+  </header>
+  <main>
+    <nav>
+      <h2>Incidents</h2>
+      ${incidentOptions || '<p class="empty">No incidents yet.</p>'}
+    </nav>
+    <section>
+      ${selected ? `
+        <div class="panel">
+          <h1>${escapeHtml(selected.status)} <small>${escapeHtml(selected.id)}</small></h1>
+          <p class="brief"><strong>Police brief:</strong> ${escapeHtml(selected.policeBrief)}</p>
+          <p class="brief"><strong>Medical:</strong> ${escapeHtml(selected.medicalBrief)}</p>
+          <p class="brief"><strong>Action:</strong> ${escapeHtml(selected.recommendedAction)}</p>
+        </div>
+        <div class="chat" id="chat">
+          ${chatRows || '<p class="empty">No authority messages yet.</p>'}
+        </div>
+        <div class="panel">
+          <h2>Send Authority Message</h2>
+          <form id="messageForm">
+            <input id="sender" value="Demo Dispatcher" aria-label="Sender">
+            <p>
+              <textarea id="message" placeholder="Type simulated police/EMS guidance..."></textarea>
+            </p>
+            <button type="submit">Send to Incident Log</button>
+            <button class="secondary" type="button" data-template="Police units are en route. Maintain shelter guidance until scene is secured.">Police En Route</button>
+            <button class="secondary" type="button" data-template="EMS staging nearby. Report injured counts and exact rooms when safe.">EMS Staging</button>
+          </form>
+        </div>
+      ` : '<div class="panel"><h1>No incident selected</h1><p class="empty">Post a demo RESPONSE:TRIGGER packet to create one.</p></div>'}
+    </section>
+    <aside>
+      <div class="panel">
+        <h2>Latest User Notes</h2>
+        <ul>${notesRows || '<li class="empty">No user notes yet.</li>'}</ul>
+      </div>
+      <div class="panel">
+        <h2>Demo Script</h2>
+        <ol>
+          <li>Trigger confirmed response from phones.</li>
+          <li>Show police/medical brief auto-generated here.</li>
+          <li>Type as dispatcher to simulate authority coordination.</li>
+          <li>Open mobile route guidance for N/E/S/W movement.</li>
+        </ol>
+      </div>
+    </aside>
+  </main>
+  <script>
+    const incidentId = ${JSON.stringify(selected?.id || null)};
+    const chat = document.getElementById("chat");
+    if (chat) chat.scrollTop = chat.scrollHeight;
+
+    document.querySelectorAll("[data-template]").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.getElementById("message").value = button.dataset.template;
+      });
+    });
+
+    const form = document.getElementById("messageForm");
+    if (form && incidentId) {
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const message = document.getElementById("message").value.trim();
+        if (!message) return;
+        await fetch("/v1/incidents/" + encodeURIComponent(incidentId) + "/authority-messages", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            sender: document.getElementById("sender").value || "Demo Dispatcher",
+            role: "authority",
+            message
+          })
+        });
+        window.location.reload();
+      });
+    }
+  </script>
 </body>
 </html>`;
 }
@@ -553,6 +781,11 @@ async function route(req, res) {
     return;
   }
 
+  if (req.method === "GET" && pathname === "/dispatch") {
+    text(res, 200, dispatchHtml(url.searchParams.get("incident")), "text/html; charset=utf-8");
+    return;
+  }
+
   if (req.method === "POST" && pathname === "/v1/mesh/alerts") {
     await handleAlert(req, res);
     return;
@@ -572,6 +805,12 @@ async function route(req, res) {
   const noteMatch = pathname.match(/^\/v1\/incidents\/([^/]+)\/notes$/);
   if (req.method === "POST" && noteMatch) {
     await handleNote(req, res, decodeURIComponent(noteMatch[1]));
+    return;
+  }
+
+  const authorityMessageMatch = pathname.match(/^\/v1\/incidents\/([^/]+)\/authority-messages$/);
+  if (req.method === "POST" && authorityMessageMatch) {
+    await handleAuthorityMessage(req, res, decodeURIComponent(authorityMessageMatch[1]));
     return;
   }
 
