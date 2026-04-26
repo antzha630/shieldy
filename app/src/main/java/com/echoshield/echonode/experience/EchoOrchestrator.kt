@@ -15,11 +15,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.UUID
+import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.random.Random
 
 class EchoOrchestrator(
     private val sensorGateway: SensorGateway,
@@ -278,8 +281,60 @@ class EchoOrchestrator(
     fun setDetectionThreshold(threshold: Double) = sensorGateway.setDetectionThreshold(threshold)
 
     fun triggerManualDebugAlert() {
-        transitionToIncidentFlow()
+        // Simulate a two-phone confirmation for testing:
+        // - "originator" phone detected gunshot at a random location 80-120m away
+        // - "this phone" confirms it as the second device
+        val myLat = _uiState.value.locationLatitude
+        val myLon = _uiState.value.locationLongitude
+
+        // Generate a random threat location 80-120 meters away in a random direction
+        val distanceMeters = Random.nextDouble(80.0, 120.0)
+        val bearingRadians = Random.nextDouble(0.0, 2 * PI)
+
+        val (threatLat, threatLon) = offsetLatLon(myLat, myLon, distanceMeters, bearingRadians)
+
+        // Create a simulated ResponseTriggerEvent
+        val sessionId = "test-${UUID.randomUUID().toString().take(8)}"
+        val simulatedTrigger = ResponseTriggerEvent(
+            sessionId = sessionId,
+            confirmedByNodes = listOf("simulated-originator", "this-device"),
+            latitude = threatLat,
+            longitude = threatLon,
+            timestamp = System.currentTimeMillis()
+        )
+
+        // Process this trigger through the normal flow (sets threatLatitude, threatLongitude, etc.)
+        handleResponseTrigger(simulatedTrigger)
+
+        // Also broadcast to peers if any are connected
         meshGateway.broadcastThreat(_uiState.value.threatZone)
+    }
+
+    /**
+     * Returns a new (lat, lon) offset from the origin by [distanceMeters] at [bearingRadians].
+     * Bearing: 0 = North, PI/2 = East, PI = South, 3*PI/2 = West.
+     */
+    private fun offsetLatLon(
+        originLat: Double,
+        originLon: Double,
+        distanceMeters: Double,
+        bearingRadians: Double
+    ): Pair<Double, Double> {
+        val latRad = Math.toRadians(originLat)
+        val lonRad = Math.toRadians(originLon)
+        val angularDistance = distanceMeters / EARTH_RADIUS_METERS
+
+        val newLatRad = kotlin.math.asin(
+            sin(latRad) * cos(angularDistance) +
+            cos(latRad) * sin(angularDistance) * cos(bearingRadians)
+        )
+
+        val newLonRad = lonRad + atan2(
+            sin(bearingRadians) * sin(angularDistance) * cos(latRad),
+            cos(angularDistance) - sin(latRad) * sin(newLatRad)
+        )
+
+        return Pair(Math.toDegrees(newLatRad), Math.toDegrees(newLonRad))
     }
 
     fun triggerEvacuate(
