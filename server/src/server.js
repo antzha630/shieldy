@@ -737,7 +737,7 @@ async function generateAgentReply(incident, userMessage) {
   let lastRawText = "";
   try {
     const buildRequest = () => ({
-        system_instruction: {
+        systemInstruction: {
           parts: [{ text: systemPrompt }]
         },
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
@@ -746,7 +746,7 @@ async function generateAgentReply(incident, userMessage) {
           topP: 0.9,
           maxOutputTokens: 180,
           responseMimeType: "application/json",
-          responseJsonSchema: AGENT_REPLY_RESPONSE_SCHEMA
+          responseSchema: AGENT_REPLY_RESPONSE_SCHEMA
         }
       });
 
@@ -784,14 +784,14 @@ async function generateAgentReply(incident, userMessage) {
     ].join("\n");
 
     const retryResult = await generateWithModelFallback(() => ({
-      system_instruction: { parts: [{ text: "You are a calm emergency assistant. Output only the requested JSON object." }] },
+      systemInstruction: { parts: [{ text: "You are a calm emergency assistant. Output only the requested JSON object." }] },
       contents: [{ role: "user", parts: [{ text: retryPrompt }] }],
       generationConfig: {
         temperature: 0.1,
         topP: 0.8,
         maxOutputTokens: 160,
         responseMimeType: "application/json",
-        responseJsonSchema: AGENT_REPLY_RESPONSE_SCHEMA
+        responseSchema: AGENT_REPLY_RESPONSE_SCHEMA
       }
     }));
 
@@ -1014,7 +1014,7 @@ async function generateAgentLiveUpdates(incident) {
   ].filter(Boolean).join("\n");
 
   const askModel = (userPrompt, maxOutputTokens = 200) => generateWithModelFallback(() => ({
-        system_instruction: {
+        systemInstruction: {
           parts: [{
             text: "Return ONLY a JSON array of strings. No other text, no explanation, no markdown."
           }]
@@ -1025,7 +1025,7 @@ async function generateAgentLiveUpdates(incident) {
           topP: 0.8,
           maxOutputTokens,
           responseMimeType: "application/json",
-          responseJsonSchema: LIVE_UPDATES_RESPONSE_SCHEMA
+          responseSchema: LIVE_UPDATES_RESPONSE_SCHEMA
         }
       }));
 
