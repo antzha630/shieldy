@@ -604,7 +604,7 @@ async function generateAgentReply(incident, userMessage) {
 
   try {
     const buildRequest = () => ({
-        system_instruction: {
+        systemInstruction: {
           parts: [{ text: systemPrompt }]
         },
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
@@ -647,7 +647,7 @@ async function generateAgentReply(incident, userMessage) {
     ].join("\n");
 
     const retryResult = await generateWithModelFallback(() => ({
-      system_instruction: { parts: [{ text: "You are an emergency assistant. Output only final answer text." }] },
+      systemInstruction: { parts: [{ text: "You are an emergency assistant. Output only final answer text." }] },
       contents: [{ role: "user", parts: [{ text: retryPrompt }] }],
       generationConfig: {
         temperature: 0.1,
@@ -842,7 +842,7 @@ async function generateAgentLiveUpdates(incident) {
 
   try {
     const { model, payload } = await generateWithModelFallback(() => ({
-        system_instruction: {
+        systemInstruction: {
           parts: [{
             text: "You produce structured emergency live updates. Return only the requested JSON value."
           }]
@@ -853,7 +853,7 @@ async function generateAgentLiveUpdates(incident) {
           topP: 0.9,
           maxOutputTokens: 180,
           responseMimeType: "application/json",
-          responseJsonSchema: LIVE_UPDATES_RESPONSE_SCHEMA
+          responseSchema: LIVE_UPDATES_RESPONSE_SCHEMA
         }
       }));
     const rawText = payload?.candidates?.[0]?.content?.parts
