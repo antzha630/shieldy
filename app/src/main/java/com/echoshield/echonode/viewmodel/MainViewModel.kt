@@ -63,12 +63,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         orchestrator.triggerManualDebugAlert()
     }
 
-    fun toggleBarricadeEvacuate() {
-        orchestrator.toggleBarricadeEvacuate()
+    fun toggleBarricadeEvacuate(broadcastToPeers: Boolean = false) {
+        orchestrator.toggleBarricadeEvacuate(broadcastToPeers)
     }
 
-    fun resetAlert() {
-        orchestrator.resetAlert()
+    fun resetAlert(broadcastToPeers: Boolean = false) {
+        orchestrator.resetAlert(broadcastToPeers)
     }
 
     fun startMesh() {
@@ -83,8 +83,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         orchestrator.setDetectionThreshold(threshold)
     }
 
-    fun triggerEvacuate(route: String = "SOUTH - EXIT 4") {
-        orchestrator.triggerEvacuate(route)
+    fun triggerEvacuate(route: String = "SOUTH - EXIT 4", broadcastToPeers: Boolean = false) {
+        orchestrator.triggerEvacuate(route, broadcastToPeers)
     }
 
     fun confirmLocation(isConfirmed: Boolean) {
@@ -123,8 +123,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         orchestrator.quickBarricade()
     }
 
-    fun quickEvacuate(route: String = "SOUTH - EXIT 4") {
-        orchestrator.quickEvacuate(route)
+    fun quickEvacuate(route: String = "SOUTH - EXIT 4", broadcastToPeers: Boolean = false) {
+        orchestrator.quickEvacuate(route, broadcastToPeers)
     }
 
     fun goBackToLocation() {

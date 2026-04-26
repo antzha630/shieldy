@@ -631,6 +631,7 @@ fun IncidentReportScreen(
     onRoomNumberChange: (String) -> Unit,
     onNotesChange: (String) -> Unit,
     onSubmit: () -> Unit,
+    onSendChat: () -> Unit,
     onBack: () -> Unit,
     onQuickBarricade: () -> Unit,
     onQuickEvacuate: () -> Unit,
@@ -692,7 +693,7 @@ fun IncidentReportScreen(
                     meshStatus = meshStatus,
                     incidentNotes = incidentNotes,
                     onNotesChange = onNotesChange,
-                    onSend = onSubmit
+                    onSend = onSendChat
                 )
                 IncidentTab.STATUS -> IncidentStatusTab(
                     companionsCount = companionsCount,
