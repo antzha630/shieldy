@@ -135,11 +135,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         orchestrator.goBackToSafetyCheck()
     }
 
-    override fun onCleared() {
-        super.onCleared()
-        orchestrator.stopMesh()
-    }
-
     private fun map(source: EchoUiState): UiState {
         return UiState(
             appState = source.appState,

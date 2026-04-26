@@ -125,6 +125,8 @@ class MeshNetworkManager(context: Context) {
 
     private var isAdvertising = false
     private var isDiscovering = false
+    private var advertisingStartInFlight = false
+    private var discoveryStartInFlight = false
     @Volatile
     private var isMeshStarted = false
     private var dutyRotationJob: Job? = null
@@ -149,13 +151,13 @@ class MeshNetworkManager(context: Context) {
                     Log.d(TAG, "Accepted connection with $endpointId")
                 }.addOnFailureListener { e ->
                     connectingEndpointIds.remove(endpointId)
-                    Log.e(TAG, "Failed to accept connection with $endpointId (${nearbyErrorDetails(e)})", e)
-                    _meshStatus.value = MeshStatus.ERROR
+                    Log.w(TAG, "Failed to accept connection with $endpointId (${nearbyErrorDetails(e)})", e)
+                    updateMeshStatus()
                 }
             }.onFailure { e ->
                 connectingEndpointIds.remove(endpointId)
-                Log.e(TAG, "Failed to accept connection with $endpointId (${nearbyErrorDetails(e)})", e)
-                _meshStatus.value = MeshStatus.ERROR
+                Log.w(TAG, "Failed to accept connection with $endpointId (${nearbyErrorDetails(e)})", e)
+                updateMeshStatus()
             }
         }
 
@@ -171,6 +173,9 @@ class MeshNetworkManager(context: Context) {
                     updateDutyAssignment()
                     updateMeshStatus()
                     replayLatestAlertState(endpointId)
+                    if (connectedEndpoints.size == 1) {
+                        stopDiscovery()
+                    }
                 }
 
                 ConnectionsStatusCodes.STATUS_CONNECTION_REJECTED -> {
@@ -181,8 +186,9 @@ class MeshNetworkManager(context: Context) {
 
                 ConnectionsStatusCodes.STATUS_ERROR -> {
                     pendingEndpointNames.remove(endpointId)
-                    Log.e(TAG, "Connection error with: $endpointId (STATUS_ERROR)")
-                    _meshStatus.value = MeshStatus.ERROR
+                    connectionAttemptTimestamps.remove(endpointId)
+                    Log.w(TAG, "Transient connection error with: $endpointId (STATUS_ERROR)")
+                    updateMeshStatus()
                 }
 
                 else -> {
@@ -206,6 +212,9 @@ class MeshNetworkManager(context: Context) {
             // Immediately restart discovery to reconnect
             scope.launch {
                 delay(500)
+                if (!isMeshStarted) {
+                    return@launch
+                }
                 if (!isDiscovering) {
                     Log.i(TAG, "Restarting discovery after peer disconnect")
                     startDiscovery()
@@ -226,6 +235,10 @@ class MeshNetworkManager(context: Context) {
             if (connectedEndpoints.containsKey(endpointId) || connectingEndpointIds.contains(endpointId)) {
                 return
             }
+            if (!shouldInitiateConnection(info.endpointName, endpointId)) {
+                Log.d(TAG, "Waiting for ${info.endpointName} to initiate connection")
+                return
+            }
             if (!shouldRequestConnection(endpointId)) {
                 Log.d(TAG, "Skipping throttled connection request to $endpointId")
                 return
@@ -239,13 +252,13 @@ class MeshNetworkManager(context: Context) {
                     Log.d(TAG, "Requested connection to $endpointId")
                 }.addOnFailureListener { e ->
                     connectingEndpointIds.remove(endpointId)
-                    Log.e(TAG, "Failed to request connection to $endpointId (${nearbyErrorDetails(e)})", e)
+                    Log.w(TAG, "Failed to request connection to $endpointId (${nearbyErrorDetails(e)})", e)
                     updateMeshStatus()
                 }
             }.onFailure { e ->
                 connectingEndpointIds.remove(endpointId)
-                Log.e(TAG, "Failed to request connection to $endpointId (${nearbyErrorDetails(e)})", e)
-                _meshStatus.value = MeshStatus.ERROR
+                Log.w(TAG, "Failed to request connection to $endpointId (${nearbyErrorDetails(e)})", e)
+                updateMeshStatus()
             }
         }
 
@@ -301,7 +314,7 @@ class MeshNetworkManager(context: Context) {
     }
 
     fun startAdvertising() {
-        if (isAdvertising) {
+        if (isAdvertising || advertisingStartInFlight) {
             Log.d(TAG, "Already advertising")
             return
         }
@@ -310,6 +323,7 @@ class MeshNetworkManager(context: Context) {
             .setStrategy(Strategy.P2P_CLUSTER)
             .build()
 
+        advertisingStartInFlight = true
         runCatching {
             connectionsClient.startAdvertising(
                 localEndpointName,
@@ -319,23 +333,26 @@ class MeshNetworkManager(context: Context) {
             )
         }.onSuccess { task ->
             task.addOnSuccessListener {
-                Log.d(TAG, "Started advertising as: $localEndpointName")
+                advertisingStartInFlight = false
                 isAdvertising = true
+                if (!isMeshStarted) {
+                    stopAdvertising()
+                    return@addOnSuccessListener
+                }
+                Log.d(TAG, "Started advertising as: $localEndpointName")
                 updateMeshStatus()
             }.addOnFailureListener { e ->
-                Log.e(TAG, "Failed to start advertising (${nearbyErrorDetails(e)})", e)
-                isAdvertising = false
-                _meshStatus.value = MeshStatus.ERROR
+                advertisingStartInFlight = false
+                handleAdvertisingStartFailure(e)
             }
         }.onFailure { e ->
-            Log.e(TAG, "Failed to start advertising (${nearbyErrorDetails(e)})", e)
-            isAdvertising = false
-            _meshStatus.value = MeshStatus.ERROR
+            advertisingStartInFlight = false
+            handleAdvertisingStartFailure(e)
         }
     }
 
     fun startDiscovery() {
-        if (isDiscovering) {
+        if (isDiscovering || discoveryStartInFlight) {
             Log.d(TAG, "Already discovering")
             return
         }
@@ -344,6 +361,7 @@ class MeshNetworkManager(context: Context) {
             .setStrategy(Strategy.P2P_CLUSTER)
             .build()
 
+        discoveryStartInFlight = true
         runCatching {
             connectionsClient.startDiscovery(
                 SERVICE_ID,
@@ -352,18 +370,59 @@ class MeshNetworkManager(context: Context) {
             )
         }.onSuccess { task ->
             task.addOnSuccessListener {
-                Log.d(TAG, "Started discovery")
+                discoveryStartInFlight = false
                 isDiscovering = true
+                if (!isMeshStarted) {
+                    stopDiscovery()
+                    return@addOnSuccessListener
+                }
+                Log.d(TAG, "Started discovery")
                 updateMeshStatus()
             }.addOnFailureListener { e ->
-                Log.e(TAG, "Failed to start discovery (${nearbyErrorDetails(e)})", e)
-                isDiscovering = false
-                _meshStatus.value = MeshStatus.ERROR
+                discoveryStartInFlight = false
+                handleDiscoveryStartFailure(e)
             }
         }.onFailure { e ->
-            Log.e(TAG, "Failed to start discovery (${nearbyErrorDetails(e)})", e)
-            isDiscovering = false
-            _meshStatus.value = MeshStatus.ERROR
+            discoveryStartInFlight = false
+            handleDiscoveryStartFailure(e)
+        }
+    }
+
+    private fun handleAdvertisingStartFailure(throwable: Throwable) {
+        when (nearbyStatusCode(throwable)) {
+            ConnectionsStatusCodes.STATUS_ALREADY_ADVERTISING -> {
+                Log.d(TAG, "Advertising already active (${nearbyErrorDetails(throwable)})")
+                isAdvertising = true
+                updateMeshStatus()
+            }
+            else -> {
+                Log.e(TAG, "Failed to start advertising (${nearbyErrorDetails(throwable)})", throwable)
+                isAdvertising = false
+                if (isMeshStarted && connectedEndpoints.isEmpty()) {
+                    _meshStatus.value = MeshStatus.ERROR
+                } else {
+                    updateMeshStatus()
+                }
+            }
+        }
+    }
+
+    private fun handleDiscoveryStartFailure(throwable: Throwable) {
+        when (nearbyStatusCode(throwable)) {
+            ConnectionsStatusCodes.STATUS_ALREADY_DISCOVERING -> {
+                Log.d(TAG, "Discovery already active (${nearbyErrorDetails(throwable)})")
+                isDiscovering = true
+                updateMeshStatus()
+            }
+            else -> {
+                Log.e(TAG, "Failed to start discovery (${nearbyErrorDetails(throwable)})", throwable)
+                isDiscovering = false
+                if (isMeshStarted && connectedEndpoints.isEmpty()) {
+                    _meshStatus.value = MeshStatus.ERROR
+                } else {
+                    updateMeshStatus()
+                }
+            }
         }
     }
 
@@ -388,7 +447,14 @@ class MeshNetworkManager(context: Context) {
         meshRetryJob = scope.launch {
             while (true) {
                 delay(MESH_RETRY_INTERVAL_MS)
+                if (!isMeshStarted) {
+                    continue
+                }
                 val status = _meshStatus.value
+                if (connectedEndpoints.isNotEmpty()) {
+                    updateMeshStatus()
+                    continue
+                }
                 
                 // Always try to keep advertising and discovering active
                 if (!isAdvertising) {
@@ -423,6 +489,7 @@ class MeshNetworkManager(context: Context) {
     }
 
     fun stopAdvertising() {
+        advertisingStartInFlight = false
         if (!isAdvertising) return
         runCatching {
             connectionsClient.stopAdvertising()
@@ -435,6 +502,7 @@ class MeshNetworkManager(context: Context) {
     }
 
     fun stopDiscovery() {
+        discoveryStartInFlight = false
         if (!isDiscovering) return
         runCatching {
             connectionsClient.stopDiscovery()
@@ -644,9 +712,6 @@ class MeshNetworkManager(context: Context) {
 
                 is CloudRelayResult.Failed -> {
                     Log.w(TAG, "Cloud relay failed for ${envelope.messageId}: ${result.reason}", result.throwable)
-                    if (connectedEndpoints.isEmpty()) {
-                        _meshStatus.value = MeshStatus.ERROR
-                    }
                 }
             }
         }
@@ -714,6 +779,17 @@ class MeshNetworkManager(context: Context) {
         }
         connectionAttemptTimestamps[endpointId] = now
         return true
+    }
+
+    private fun shouldInitiateConnection(remoteEndpointName: String, endpointId: String): Boolean {
+        val remoteStableName = remoteEndpointName.ifBlank { endpointId }
+        if (remoteStableName == localEndpointName) {
+            return false
+        }
+
+        // Both devices advertise and discover. A stable ordering prevents both
+        // sides from sending simultaneous connection requests to each other.
+        return localEndpointName < remoteStableName
     }
 
     private fun emitIncoming(message: String) {
@@ -1171,9 +1247,6 @@ class MeshNetworkManager(context: Context) {
 
                 is CloudRelayResult.Failed -> {
                     Log.w(TAG, "Cloud response relay failed for ${trigger.sessionId}: ${result.reason}", result.throwable)
-                    if (connectedEndpoints.isEmpty()) {
-                        _meshStatus.value = MeshStatus.ERROR
-                    }
                 }
             }
         }
@@ -1218,8 +1291,11 @@ class MeshNetworkManager(context: Context) {
     }
 
     private fun nearbyErrorDetails(throwable: Throwable): String {
-        val api = throwable as? ApiException ?: return throwable.javaClass.simpleName
-        val code = api.statusCode
+        val code = nearbyStatusCode(throwable) ?: return throwable.javaClass.simpleName
         return "code=$code(${ConnectionsStatusCodes.getStatusCodeString(code)})"
+    }
+
+    private fun nearbyStatusCode(throwable: Throwable): Int? {
+        return (throwable as? ApiException)?.statusCode
     }
 }

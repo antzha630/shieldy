@@ -76,7 +76,6 @@ fun EchoShieldRoot() {
         
         if (allPermissionsGranted) {
             AudioSensorService.startService(context)
-            viewModel.startMesh()
         }
     }
 
@@ -84,7 +83,6 @@ fun EchoShieldRoot() {
         if (allPermissionsGranted) {
             Log.d("EchoShield", "All permissions granted, starting services")
             AudioSensorService.startService(context)
-            viewModel.startMesh()
         }
     }
 
