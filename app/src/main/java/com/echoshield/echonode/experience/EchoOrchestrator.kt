@@ -550,6 +550,11 @@ class EchoOrchestrator(
     }
 
     private fun transitionToIncidentFlow() {
+        val currentState = _uiState.value.appState
+        if (currentState != AppState.LISTENING) {
+            return
+        }
+
         _uiState.value = _uiState.value.copy(
             appState = AppState.LOCATION_CONFIRMATION,
             locationConfirmed = false,
