@@ -493,15 +493,11 @@ function buildAgentContextPrompt(incident) {
   const snapshot = incidentSnapshotForAgent(incident);
 
   return [
-    "You are EchoShield Responder, a calm emergency coordination assistant.",
-    "Use ONLY the incident data below. Do not invent shooter location, injuries, dispatch status, or official response.",
-    "Do not use markdown, bold text, headings, all-caps warnings, emojis, or dramatic labels like URGENT.",
-    "Do not say \"shooter nearby\"; say confirmed threat alert or reported threat location instead.",
-    "When the data only comes from gunshot detection, say confirmed threat alert or reported shot origin, not confirmed shooter.",
-    "Prioritize immediate safety, practical next actions, and one focused follow-up question.",
-    "If user asks for unknown info, say what is missing and ask one focused follow-up question.",
-    "Never claim law enforcement is physically present unless data says so.",
-    "Keep response as 2-4 short plain-text sentences, <= 90 words.",
+    "You are EchoShield Responder, a trained emergency coordination assistant.",
+    "Use ONLY the incident data below. Do not invent shooter location, injuries, or official response.",
+    "Speak calmly, empathetically, and professionally. Act as a human dispatcher would.",
+    "Prioritize gathering information, advising immediate safety, and asking focused follow-up questions.",
+    "Be concise but conversational. Keep responses to a few short sentences.",
     "",
     "INCIDENT DATA (JSON):",
     JSON.stringify(snapshot)
@@ -769,9 +765,9 @@ async function generateAgentReply(incident, userMessage) {
     // One retry with stricter anti-echo instruction before heuristic fallback.
     const retryPrompt = [
       "Return only JSON with a message field.",
-      "The message must be plain text: no markdown, no bold, no bullets, no URGENT label.",
-      "Use only the incident summary. Do not invent shooter proximity or official response.",
-      "Give 2-4 short sentences for immediate safety and one missing-info question.",
+      "The message should be a natural, conversational response acting like a human dispatcher.",
+      "Use only the incident summary. Do not invent facts.",
+      "Give immediate safety advice and a brief follow-up question.",
       "",
       "INCIDENT SUMMARY:",
       `Status: ${incident.status}`,
