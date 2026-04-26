@@ -568,12 +568,20 @@ class AudioSensorService : Service() {
                             val lat = location?.latitude ?: 0.0
                             val lon = location?.longitude ?: 0.0
                             
-                            // Disarm self as sentinel (prevents re-trigger from same source)
-                            // and broadcast WAKE_CLASSIFY to wake up other phones
-                            meshNetworkManager.disarmSentinel()
+                            val connectedPeers = meshNetworkManager.getConnectedPeerIds().size
+                            // Only handoff sentinel duty when peers are available. On a solo
+                            // device, disarming creates a long idle period during testing.
+                            if (connectedPeers > 0) {
+                                meshNetworkManager.disarmSentinel()
+                            } else {
+                                Log.i(TAG, "Threat detected with no peers; keeping local sentinel active")
+                            }
                             meshNetworkManager.broadcastWakeClassify(lat, lon)
                             
-                            Log.i(TAG, "Sentinel disarmed, WAKE_CLASSIFY broadcast at ($lat, $lon)")
+                            Log.i(
+                                TAG,
+                                "WAKE_CLASSIFY broadcast at ($lat, $lon), peers=$connectedPeers"
+                            )
                             
                             // Note: Audio recording will stop when duty assignment updates
                             // and isSentinelActive becomes false
