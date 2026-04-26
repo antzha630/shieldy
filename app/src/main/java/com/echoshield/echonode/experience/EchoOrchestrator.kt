@@ -42,6 +42,7 @@ class EchoOrchestrator(
     private var lastThreatLatitude: Double = 0.0
     private var lastThreatLongitude: Double = 0.0
     private var lastThreatSessionId: String? = null
+    private var barricadeSplashShownForSessionId: String? = null
 
     fun bind(scope: CoroutineScope) {
         boundScope = scope
@@ -127,6 +128,10 @@ class EchoOrchestrator(
     }
 
     private fun handleResponseTrigger(trigger: ResponseTriggerEvent) {
+        val shouldShowBarricadeSplash = barricadeSplashShownForSessionId != trigger.sessionId
+        if (shouldShowBarricadeSplash) {
+            barricadeSplashShownForSessionId = trigger.sessionId
+        }
         lastThreatSessionId = trigger.sessionId
         lastThreatLatitude = trigger.latitude
         lastThreatLongitude = trigger.longitude
@@ -161,7 +166,8 @@ class EchoOrchestrator(
         }
 
         _uiState.value = _uiState.value.copy(
-            appState = AppState.BARRICADE,
+            // Show full-screen red barricade only once per threat session.
+            appState = if (shouldShowBarricadeSplash) AppState.BARRICADE else AppState.INCIDENT_REPORT,
             threatZone = threatZone,
             evacuationRoute = evacuationRoute,
             relativeLocation = relativeMessage,
@@ -310,6 +316,8 @@ class EchoOrchestrator(
     }
 
     fun resetAlert(broadcastToPeers: Boolean = false) {
+        barricadeSplashShownForSessionId = null
+        lastThreatSessionId = null
         _uiState.value = _uiState.value.copy(
             appState = AppState.LISTENING,
             locationConfirmed = false,
