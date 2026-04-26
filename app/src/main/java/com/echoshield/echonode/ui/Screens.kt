@@ -772,10 +772,37 @@ private fun IncidentMapTab(
         } else emptyList()
     }
 
-    val escapeTarget = userPoint?.let { computeEscapeTarget(it, dynamicZones) }
-    val isInsideThreat = userPoint != null && dynamicZones.any { zone ->
-        mapDistanceM(userPoint, LatLng(zone.latitude, zone.longitude)) <= zone.radiusMeters
+    val threatCenter = dynamicZones.firstOrNull()?.let { LatLng(it.latitude, it.longitude) }
+        ?: if (threatLatitude != 0.0 || threatLongitude != 0.0) {
+            LatLng(threatLatitude, threatLongitude)
+        } else null
+    val asherZones = threatCenter?.let { center ->
+        buildAsherZones(
+            center = center,
+            baseHotRadiusMeters = dynamicZones.firstOrNull()?.radiusMeters ?: threatRadiusMeters
+        )
     }
+    val escapeTargetSeed = if (dynamicZones.isNotEmpty()) {
+        dynamicZones
+    } else {
+        asherZones?.let {
+            listOf(
+                ThreatZone(
+                    latitude = it.center.latitude,
+                    longitude = it.center.longitude,
+                    radiusMeters = it.warmRadiusMeters,
+                    confidence = 0.7f,
+                    source = "asher-hotspot"
+                )
+            )
+        } ?: emptyList()
+    }
+    val escapeTarget = userPoint?.let { computeEscapeTarget(it, escapeTargetSeed) }
+    val zoneClass = when {
+        userPoint == null || asherZones == null -> AsherZoneClass.UNKNOWN
+        else -> classifyAsherZone(userPoint, asherZones)
+    }
+    val isInsideThreat = zoneClass == AsherZoneClass.HOT
     val escapeLabel = if (userPoint != null && escapeTarget != null)
         mapEscapeDirectionLabel(userPoint, escapeTarget) else null
 
@@ -799,11 +826,9 @@ private fun IncidentMapTab(
                 // Re-center on user every time their position or the primary threat changes.
                 // Zoom out just enough to show the entire red threat circle.
                 LaunchedEffect(locationLatitude, locationLongitude, zoneKey) {
-                    val primaryZone = dynamicZones.firstOrNull()
-                    val zoom = if (primaryZone != null) {
-                        val dist = mapDistanceM(
-                            userPoint, LatLng(primaryZone.latitude, primaryZone.longitude))
-                        val maxM = (dist + primaryZone.radiusMeters).coerceAtLeast(50.0)
+                    val zoom = if (asherZones != null) {
+                        val dist = mapDistanceM(userPoint, asherZones.center)
+                        val maxM = (dist + asherZones.coldRadiusMeters).coerceAtLeast(60.0)
                         mapZoomForDist(maxM, locationLatitude)
                     } else INCIDENT_MAP_DEFAULT_ZOOM
                     kotlin.runCatching {
@@ -824,22 +849,35 @@ private fun IncidentMapTab(
                         snippet = relativeLocation.ifBlank { locationLabel }
                     )
 
-                    // Red threat circles with a red center dot for each zone
-                    dynamicZones.forEachIndexed { index, zone ->
-                        val threatPoint = LatLng(zone.latitude, zone.longitude)
-                        val alphaScale = (zone.confidence * (1f - index * 0.12f)).coerceIn(0.25f, 1f)
+                    // NFPA 3000 ASHER zones:
+                    // Hot (red), Warm (amber), Cold (green/blue) around threat center.
+                    asherZones?.let { zones ->
                         Circle(
-                            center = threatPoint,
-                            radius = zone.radiusMeters,
-                            fillColor = AccentRed.copy(alpha = 0.18f * alphaScale),
-                            strokeColor = AccentRed.copy(alpha = 0.85f * alphaScale),
-                            strokeWidth = if (index == 0) 4f else 2f
+                            center = zones.center,
+                            radius = zones.coldRadiusMeters,
+                            fillColor = Color(0xFF2F6BDE).copy(alpha = 0.06f),
+                            strokeColor = Color(0xFF2F6BDE).copy(alpha = 0.45f),
+                            strokeWidth = 2f
+                        )
+                        Circle(
+                            center = zones.center,
+                            radius = zones.warmRadiusMeters,
+                            fillColor = Color(0xFFF0A500).copy(alpha = 0.10f),
+                            strokeColor = Color(0xFFF0A500).copy(alpha = 0.70f),
+                            strokeWidth = 3f
+                        )
+                        Circle(
+                            center = zones.center,
+                            radius = zones.hotRadiusMeters,
+                            fillColor = AccentRed.copy(alpha = 0.18f),
+                            strokeColor = AccentRed.copy(alpha = 0.90f),
+                            strokeWidth = 4f
                         )
                         Marker(
-                            state = MarkerState(position = threatPoint),
+                            state = MarkerState(position = zones.center),
                             icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED),
-                            title = if (index == 0) "Active Threat" else "Earlier Threat",
-                            snippet = "Source: ${zone.source}"
+                            title = "Threat Center (HOT ZONE)",
+                            snippet = "Warm/Cold rings represent reduced threat exposure"
                         )
                     }
 
@@ -881,21 +919,20 @@ private fun IncidentMapTab(
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
                 when {
-                    isInsideThreat -> {
+                    zoneClass == AsherZoneClass.HOT -> {
                         SectionLabel("⚠ BARRICADE NOW")
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "You are inside the active threat zone. Lock doors, stay low, silence your device, and do not move.",
+                            text = "HOT ZONE: direct threat possible. Shelter in place, lock and barricade doors, stay low, and silence your phone.",
                             fontSize = 13.sp,
                             color = AccentRed
                         )
                     }
-                    escapeLabel != null -> {
+                    zoneClass == AsherZoneClass.WARM && escapeLabel != null -> {
                         SectionLabel(escapeLabel)
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = evacuationRoute.ifBlank {
-                                "Move away from the threat as quickly and calmly as possible." },
+                            text = evacuationRoute.ifBlank { "WARM ZONE: evacuate away from HOT center along the arrow direction." },
                             fontSize = 13.sp,
                             color = AccentGreen
                         )
@@ -903,6 +940,15 @@ private fun IncidentMapTab(
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(text = serverRecommendedAction, fontSize = 12.sp, color = SecondaryText)
                         }
+                    }
+                    zoneClass == AsherZoneClass.COLD -> {
+                        SectionLabel("COLD ZONE: REPORT / ALL CLEAR")
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "You are outside the primary danger rings. Continue moving to safety, report status/notes, and wait for official instructions.",
+                            fontSize = 13.sp,
+                            color = SecondaryText
+                        )
                     }
                     else -> {
                         SectionLabel("Route Guidance")
@@ -919,10 +965,10 @@ private fun IncidentMapTab(
                         }
                     }
                 }
-                if (dynamicZones.isNotEmpty()) {
+                if (asherZones != null) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "${dynamicZones.size} threat zone(s) tracked",
+                        text = "ASHER zones active: HOT ${asherZones.hotRadiusMeters.toInt()}m · WARM ${asherZones.warmRadiusMeters.toInt()}m · COLD ${asherZones.coldRadiusMeters.toInt()}m",
                         fontSize = 11.sp,
                         color = AccentRed.copy(alpha = 0.7f)
                     )
@@ -942,7 +988,7 @@ private fun IncidentMapTab(
                 if (liveUpdates.isEmpty()) {
                     LiveUpdateRow("Waiting for server updates...")
                 } else {
-                    liveUpdates.take(6).forEach { update ->
+                    liveUpdates.take(6).asReversed().forEach { update ->
                         LiveUpdateRow(update)
                     }
                 }
@@ -1027,6 +1073,38 @@ private fun computeEscapeTarget(user: LatLng, zones: List<ThreatZone>): LatLng? 
         user.latitude + normalizedLat * distanceDeg,
         user.longitude + normalizedLon * distanceDeg
     )
+}
+
+private enum class AsherZoneClass {
+    HOT, WARM, COLD, UNKNOWN
+}
+
+private data class AsherZones(
+    val center: LatLng,
+    val hotRadiusMeters: Double,
+    val warmRadiusMeters: Double,
+    val coldRadiusMeters: Double
+)
+
+private fun buildAsherZones(center: LatLng, baseHotRadiusMeters: Double): AsherZones {
+    val hot = baseHotRadiusMeters.coerceIn(60.0, 180.0)
+    val warm = (hot * 2.3).coerceIn(180.0, 420.0)
+    val cold = (warm * 1.8).coerceIn(350.0, 900.0)
+    return AsherZones(
+        center = center,
+        hotRadiusMeters = hot,
+        warmRadiusMeters = warm,
+        coldRadiusMeters = cold
+    )
+}
+
+private fun classifyAsherZone(user: LatLng, zones: AsherZones): AsherZoneClass {
+    val distance = mapDistanceM(user, zones.center)
+    return when {
+        distance <= zones.hotRadiusMeters -> AsherZoneClass.HOT
+        distance <= zones.warmRadiusMeters -> AsherZoneClass.WARM
+        else -> AsherZoneClass.COLD
+    }
 }
 
 @Composable

@@ -519,20 +519,60 @@ async function generateAgentReply(incident, userMessage) {
 
 function generateHeuristicLiveUpdates(incident) {
   const updates = [];
-  updates.push(`Status: ${incident.status}.`);
-  updates.push(incident.recommendedAction);
-  updates.push(incident.policeBrief);
-  if (incident.medicalBrief && incident.medicalBrief !== "No medical notes received yet.") {
-    updates.push(incident.medicalBrief);
-  }
+  const seen = new Set();
+  const push = (value) => {
+    const text = String(value || "").trim();
+    if (!text) return;
+    const key = text.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    updates.push(text);
+  };
+
+  // Always include operational baseline first.
+  push(`Status: ${incident.status}.`);
+  push(incident.recommendedAction);
+
+  // Rank user crowd reports by likely urgency/actionability.
+  const rankedUserReports = incident.authorityMessages
+    .filter((m) => String(m.role || "").toLowerCase() === "user")
+    .slice(-24)
+    .map((m) => ({ message: String(m.message || "").trim(), at: m.at || "" }))
+    .filter((m) => m.message.length > 0)
+    .map((m) => ({ ...m, score: scoreLiveUpdateReport(m.message) }))
+    .filter((m) => m.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  rankedUserReports.slice(0, 3).forEach((entry) => {
+    push(`Field report: ${entry.message}`);
+  });
+
+  // Include latest structured status note if present.
   const latestNote = incident.notes.at(-1)?.note?.trim();
   if (latestNote) {
-    updates.push(`Latest field note: ${latestNote}`);
+    push(`Status note: ${latestNote}`);
   }
-  return updates
-    .map((line) => String(line || "").trim())
-    .filter(Boolean)
-    .slice(0, 6);
+
+  // Keep responder briefs lower in feed than direct reports.
+  if (incident.medicalBrief && incident.medicalBrief !== "No medical notes received yet.") {
+    push(incident.medicalBrief);
+  }
+  push(incident.policeBrief);
+
+  return updates.slice(0, 6);
+}
+
+function scoreLiveUpdateReport(message) {
+  const text = String(message || "").toLowerCase();
+  if (!text) return 0;
+  let score = 0;
+  if (/\binjured|bleeding|wounded|shot|hurt\b/.test(text)) score += 5;
+  if (/\bshooter|gun|shots|firearm|weapon\b/.test(text)) score += 5;
+  if (/\bwhere|location|near|hall|stair|exit|room|floor|building\b/.test(text)) score += 4;
+  if (/\btrapped|blocked|smoke|fire|crowd|panic|cannot\b/.test(text)) score += 3;
+  if (/\bevacuate|run|hide|barricade|safe|unsafe\b/.test(text)) score += 2;
+  if (text.length > 30) score += 1;
+  return score;
 }
 
 function parseLiveUpdatesResponse(rawText) {
@@ -563,6 +603,8 @@ async function generateAgentLiveUpdates(incident) {
     "You are generating the EchoShield map live-updates feed.",
     "From the incident JSON below, output ONLY a JSON array of 3-6 short strings.",
     "Each string should be concise, actionable, and prioritized by urgency.",
+    "Prioritize cross-user crowd reports that contain injury status, shooter location/direction, blocked exits, and room-level situational updates.",
+    "Prefer actionable updates over generic acknowledgements.",
     "Do not include markdown, labels, bullets, or explanation outside JSON.",
     "",
     "INCIDENT DATA (JSON):",
