@@ -34,7 +34,7 @@ class RetrofitCloudGateway private constructor(
 ) : CloudGateway {
     companion object {
         private const val TAG = "CloudGateway"
-        private const val POLL_INTERVAL_MS = 3_000L
+        private const val POLL_INTERVAL_MS = 1_500L
         private const val PREFS_NAME = "echoshield_cloud"
         private const val PREF_DEVICE_ID = "cloud_device_id"
 
@@ -133,7 +133,11 @@ class RetrofitCloudGateway private constructor(
 
         return runCatching {
             val response = api.submitIncidentReport(request)
-            response.isSuccessful
+            val ok = response.isSuccessful
+            if (ok) {
+                fetchLatestIncident()
+            }
+            ok
         }.getOrElse {
             Log.w(TAG, "submitIncidentReport failed", it)
             false
@@ -149,7 +153,11 @@ class RetrofitCloudGateway private constructor(
         )
         return runCatching {
             val response = api.sendAuthorityMessage(incidentId, request)
-            response.isSuccessful
+            val ok = response.isSuccessful
+            if (ok) {
+                fetchLatestIncident()
+            }
+            ok
         }.getOrElse {
             Log.w(TAG, "sendAuthorityMessage failed", it)
             false

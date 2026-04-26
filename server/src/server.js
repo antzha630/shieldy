@@ -17,6 +17,11 @@ const SENDGRID_FROM = process.env.SENDGRID_FROM || "";
 const DISPATCH_EMAIL_TO = process.env.DISPATCH_EMAIL_TO || "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+const GEMINI_MODEL_FALLBACKS = [
+  "gemma-3-27b-it",
+  "gemini-1.5-flash",
+  "gemini-1.5-pro"
+];
 
 const incidents = new Map();
 const seenMessages = new Set();
@@ -398,6 +403,8 @@ function generateHeuristicAuthorityReply(incident, userMessage) {
   const message = String(userMessage || "").toLowerCase();
   const roomHint = incident.notes.at(-1)?.roomNumber || "your current area";
   const injuredCount = incident.notes.reduce((sum, note) => sum + (Number(note.injuredCount) || 0), 0);
+  const confirmed = incident.confirmedByNodes.length || 0;
+  const action = incident.recommendedAction || "Follow current route guidance and avoid threat lines.";
 
   if (message.includes("injured") || message.includes("bleeding") || message.includes("hurt")) {
     return `EMS acknowledged. Keep pressure on wounds if safe, avoid moving critical injuries, and stay in ${roomHint}. Report any change in injured count.`;
@@ -411,7 +418,12 @@ function generateHeuristicAuthorityReply(incident, userMessage) {
   if (message.includes("safe") || message.includes("clear")) {
     return "Status received. Continue to hold position and submit updates every 30-60 seconds until all-clear is confirmed.";
   }
-  return "Dispatch received your message. Keep sharing location/safety/injury updates; responders are using this feed for live coordination.";
+  return [
+    `Update logged for incident ${incident.id.slice(-6)} (${incident.status}).`,
+    `Current guidance: ${action}`,
+    `Confirmed reports: ${confirmed}${injuredCount > 0 ? ` · reported injured: ${injuredCount}` : ""}.`,
+    `If safe, send your exact room/landmark and movement blockers near ${roomHint}.`
+  ].join(" ");
 }
 
 function clearIncidentNotifications(incident) {
@@ -462,7 +474,9 @@ function buildAgentContextPrompt(incident) {
 
   return [
     "You are EchoShield Responder, a concise emergency coordination assistant.",
-    "Use incident data below. Prioritize immediate safety and practical next actions.",
+    "Use ONLY the incident data below. Do not invent facts or resources.",
+    "Prioritize immediate safety, practical next actions, and short location-aware guidance.",
+    "If user asks for unknown info, say what is missing and ask one focused follow-up question.",
     "Never claim law enforcement is physically present unless data says so.",
     "Keep response <= 120 words. Bullet points are okay.",
     "",
@@ -471,20 +485,67 @@ function buildAgentContextPrompt(incident) {
   ].join("\n");
 }
 
+function orderedModelCandidates() {
+  const seen = new Set();
+  const ordered = [];
+  [GEMINI_MODEL, ...GEMINI_MODEL_FALLBACKS].forEach((model) => {
+    const value = String(model || "").trim();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    ordered.push(value);
+  });
+  return ordered;
+}
+
+async function generateWithModelFallback(requestBodyBuilder) {
+  const candidates = orderedModelCandidates();
+  let lastError = null;
+
+  for (const model of candidates) {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(requestBodyBuilder())
+      });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        const err = new Error(`Gemini HTTP ${response.status} model=${model} ${text.slice(0, 180)}`.trim());
+        if (response.status === 404) {
+          // Model name unavailable for this API key/project; try next candidate.
+          console.warn(`[relay] model unavailable, trying fallback: ${model}`);
+          lastError = err;
+          continue;
+        }
+        throw err;
+      }
+
+      const payload = await response.json();
+      return { model, payload };
+    } catch (error) {
+      lastError = error;
+      if (String(error?.message || "").includes("HTTP 404")) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError || new Error("No usable Gemini/Gemma model available");
+}
+
 async function generateAgentReply(incident, userMessage) {
   if (!GEMINI_API_KEY) {
     return generateHeuristicAuthorityReply(incident, userMessage);
   }
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
   const systemPrompt = buildAgentContextPrompt(incident);
   const userPrompt = `USER MESSAGE:\n${String(userMessage || "").trim()}`;
 
   try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    const { model, payload } = await generateWithModelFallback(() => ({
         contents: [
           { role: "user", parts: [{ text: systemPrompt }] },
           { role: "user", parts: [{ text: userPrompt }] }
@@ -494,14 +555,7 @@ async function generateAgentReply(incident, userMessage) {
           topP: 0.9,
           maxOutputTokens: 220
         }
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Gemini HTTP ${response.status}`);
-    }
-
-    const payload = await response.json();
+      }));
     const text = payload?.candidates?.[0]?.content?.parts
       ?.map((part) => part?.text || "")
       .join("\n")
@@ -510,6 +564,7 @@ async function generateAgentReply(incident, userMessage) {
     if (!text) {
       throw new Error("Gemini returned empty text");
     }
+    console.info(`[relay] Agent reply model=${model}`);
     return text.slice(0, 1800);
   } catch (error) {
     console.warn("[relay] Gemini reply failed, falling back to heuristic:", error.message);
@@ -598,12 +653,13 @@ async function generateAgentLiveUpdates(incident) {
     return generateHeuristicLiveUpdates(incident);
   }
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
   const prompt = [
     "You are generating the EchoShield map live-updates feed.",
     "From the incident JSON below, output ONLY a JSON array of 3-6 short strings.",
-    "Each string should be concise, actionable, and prioritized by urgency.",
+    "Each string should be concise, actionable, and prioritized by urgency and confidence.",
     "Prioritize cross-user crowd reports that contain injury status, shooter location/direction, blocked exits, and room-level situational updates.",
+    "Prefer corroborated facts from multiple users over single uncertain claims.",
+    "If facts conflict, include the safest conservative instruction and mark uncertainty briefly.",
     "Prefer actionable updates over generic acknowledgements.",
     "Do not include markdown, labels, bullets, or explanation outside JSON.",
     "",
@@ -612,28 +668,23 @@ async function generateAgentLiveUpdates(incident) {
   ].join("\n");
 
   try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    const { model, payload } = await generateWithModelFallback(() => ({
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
           temperature: 0.2,
           topP: 0.9,
           maxOutputTokens: 220
         }
-      })
-    });
-    if (!response.ok) {
-      throw new Error(`Gemini HTTP ${response.status}`);
-    }
-    const payload = await response.json();
+      }));
     const rawText = payload?.candidates?.[0]?.content?.parts
       ?.map((part) => part?.text || "")
       .join("\n")
       .trim();
     const parsed = parseLiveUpdatesResponse(rawText);
-    if (parsed.length) return parsed;
+    if (parsed.length) {
+      console.info(`[relay] Live updates model=${model}`);
+      return parsed;
+    }
     throw new Error("Gemini returned no usable live updates");
   } catch (error) {
     console.warn("[relay] Gemini live-updates failed, fallback used:", error.message);

@@ -849,8 +849,7 @@ private fun IncidentMapTab(
                         snippet = relativeLocation.ifBlank { locationLabel }
                     )
 
-                    // NFPA 3000 ASHER zones:
-                    // Hot (red), Warm (amber), Cold (green/blue) around threat center.
+                    // Three threat-severity rings around the threat center.
                     asherZones?.let { zones ->
                         Circle(
                             center = zones.center,
@@ -876,8 +875,8 @@ private fun IncidentMapTab(
                         Marker(
                             state = MarkerState(position = zones.center),
                             icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED),
-                            title = "Threat Center (HOT ZONE)",
-                            snippet = "Warm/Cold rings represent reduced threat exposure"
+                            title = "Threat Center",
+                            snippet = "Outer rings indicate decreasing threat severity"
                         )
                     }
 
@@ -923,7 +922,7 @@ private fun IncidentMapTab(
                         SectionLabel("⚠ BARRICADE NOW")
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "HOT ZONE: direct threat possible. Shelter in place, lock and barricade doors, stay low, and silence your phone.",
+                            text = "Immediate danger likely nearby. Shelter in place, lock and barricade doors, stay low, and silence your phone.",
                             fontSize = 13.sp,
                             color = AccentRed
                         )
@@ -932,7 +931,7 @@ private fun IncidentMapTab(
                         SectionLabel(escapeLabel)
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = evacuationRoute.ifBlank { "WARM ZONE: evacuate away from HOT center along the arrow direction." },
+                            text = evacuationRoute.ifBlank { "Move away from the threat center along the arrow direction." },
                             fontSize = 13.sp,
                             color = AccentGreen
                         )
@@ -942,10 +941,10 @@ private fun IncidentMapTab(
                         }
                     }
                     zoneClass == AsherZoneClass.COLD -> {
-                        SectionLabel("COLD ZONE: REPORT / ALL CLEAR")
+                        SectionLabel("REPORT / ALL CLEAR")
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "You are outside the primary danger rings. Continue moving to safety, report status/notes, and wait for official instructions.",
+                            text = "You are outside the primary danger area. Continue moving to safety, report status/notes, and wait for official instructions.",
                             fontSize = 13.sp,
                             color = SecondaryText
                         )
@@ -965,14 +964,6 @@ private fun IncidentMapTab(
                         }
                     }
                 }
-                if (asherZones != null) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "ASHER zones active: HOT ${asherZones.hotRadiusMeters.toInt()}m · WARM ${asherZones.warmRadiusMeters.toInt()}m · COLD ${asherZones.coldRadiusMeters.toInt()}m",
-                        fontSize = 11.sp,
-                        color = AccentRed.copy(alpha = 0.7f)
-                    )
-                }
             }
         }
 
@@ -988,7 +979,7 @@ private fun IncidentMapTab(
                 if (liveUpdates.isEmpty()) {
                     LiveUpdateRow("Waiting for server updates...")
                 } else {
-                    liveUpdates.take(6).asReversed().forEach { update ->
+                    liveUpdates.take(6).forEach { update ->
                         LiveUpdateRow(update)
                     }
                 }
@@ -1134,12 +1125,6 @@ private fun IncidentChatTab(
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
                 Text("Emergency Agent", fontWeight = FontWeight.Bold, color = DarkText, fontSize = 20.sp)
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = if (meshStatus == MeshStatus.CONNECTED) "Active" else "Connecting",
-                    color = SecondaryText,
-                    fontSize = 13.sp
-                )
             }
         }
 
