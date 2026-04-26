@@ -223,8 +223,7 @@ fun EchoShieldRoot() {
             AppState.BARRICADE.name -> {
                 BarricadeScreen(
                     threatZone = uiState.threatZone,
-                    onToggle = { viewModel.toggleBarricadeEvacuate() },
-                    onReset = { viewModel.resetAlert() },
+                    onAutoDismiss = { viewModel.continueToIncidentReport() },
                     modifier = Modifier.fillMaxSize()
                 )
             }

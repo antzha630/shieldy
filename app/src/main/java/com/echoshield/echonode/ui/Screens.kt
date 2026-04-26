@@ -78,6 +78,7 @@ import com.google.maps.android.compose.rememberCameraPositionState
 import com.echoshield.echonode.core.contracts.MeshStatus
 import com.echoshield.echonode.core.contracts.SafetyStatus
 import com.echoshield.echonode.core.contracts.ThreatZone
+import kotlinx.coroutines.delay
 import com.echoshield.echonode.core.contracts.ConversationMessage
 import com.echoshield.echonode.viewmodel.MainViewModel
 
@@ -1315,10 +1316,15 @@ private fun LiveUpdateRow(text: String) {
 @Composable
 fun BarricadeScreen(
     threatZone: String,
-    onToggle: () -> Unit,
-    onReset: () -> Unit,
+    onAutoDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    LaunchedEffect(Unit) {
+        // Keep the splash brief, then move users to the main incident tabs.
+        delay(2500)
+        onAutoDismiss()
+    }
+
     val infiniteTransition = rememberInfiniteTransition(label = "alert")
     val flashAlpha by infiniteTransition.animateFloat(
         initialValue = 0.9f,
@@ -1395,24 +1401,6 @@ fun BarricadeScreen(
             }
 
             Spacer(modifier = Modifier.height(40.dp))
-
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Button(
-                    onClick = onToggle,
-                    colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Text("EVACUATE", fontWeight = FontWeight.Bold, color = CardWhite)
-                }
-
-                OutlinedButton(
-                    onClick = onReset,
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = CardWhite),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Text("ALL CLEAR", fontWeight = FontWeight.Bold)
-                }
-            }
         }
     }
 }
