@@ -51,6 +51,7 @@ class MeshNetworkManager(context: Context) {
         private const val SEND_RETRY_ATTEMPTS = 1
         private const val DUTY_REFRESH_MS = 15_000L
         private const val VOTE_WINDOW_MS = 5_000L
+        private const val MESH_RETRY_INTERVAL_MS = 5_000L
         private const val DEFAULT_CONFIRMATION_THRESHOLD = 2
         private const val PREFS_NAME = "echoshield_mesh"
         private const val PREF_LOCAL_NODE_ID = "local_node_id"
@@ -190,13 +191,27 @@ class MeshNetworkManager(context: Context) {
         }
 
         override fun onDisconnected(endpointId: String) {
-            Log.d(TAG, "Disconnected from: $endpointId")
+            Log.w(TAG, "Disconnected from: $endpointId - will attempt reconnect")
             connectedEndpoints.remove(endpointId)
             pendingEndpointNames.remove(endpointId)
             connectingEndpointIds.remove(endpointId)
+            connectionAttemptTimestamps.remove(endpointId)
             updatePeerCount()
             updateDutyAssignment()
             updateMeshStatus()
+            
+            // Immediately restart discovery to reconnect
+            scope.launch {
+                delay(500)
+                if (!isDiscovering) {
+                    Log.i(TAG, "Restarting discovery after peer disconnect")
+                    startDiscovery()
+                }
+                if (!isAdvertising) {
+                    Log.i(TAG, "Restarting advertising after peer disconnect")
+                    startAdvertising()
+                }
+            }
         }
     }
 
@@ -349,14 +364,44 @@ class MeshNetworkManager(context: Context) {
         }
     }
 
+    private var meshRetryJob: Job? = null
+
     fun startMesh() {
         startDutyRotation()
         startVoteCleanup()
         startAdvertising()
         startDiscovery()
+        startMeshRetryLoop()
+    }
+
+    private fun startMeshRetryLoop() {
+        if (meshRetryJob?.isActive == true) return
+        meshRetryJob = scope.launch {
+            while (true) {
+                delay(MESH_RETRY_INTERVAL_MS)
+                val status = _meshStatus.value
+                
+                // Always try to keep advertising and discovering active
+                if (!isAdvertising) {
+                    Log.i(TAG, "Mesh retry: restarting advertising (status=$status)")
+                    startAdvertising()
+                }
+                if (!isDiscovering) {
+                    Log.i(TAG, "Mesh retry: restarting discovery (status=$status)")
+                    startDiscovery()
+                }
+                
+                // Clear error state if we've restarted successfully
+                if (status == MeshStatus.ERROR && (isAdvertising || isDiscovering)) {
+                    updateMeshStatus()
+                }
+            }
+        }
     }
 
     fun stopMesh() {
+        meshRetryJob?.cancel()
+        meshRetryJob = null
         stopDutyRotation()
         stopVoteCleanup()
         stopAdvertising()

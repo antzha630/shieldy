@@ -9,6 +9,10 @@ class LeaderDutyCoordinator(
         private const val DEFAULT_ROTATION_WINDOW_MS = 60_000L
         private const val DEFAULT_SENTINEL_ROTATION_WINDOW_MS = 30_000L
         const val DEFAULT_SENTINEL_DISARM_MS = 30_000L
+        
+        // HACKATHON MODE: All phones always act as sentinels (no rotation)
+        // Set to false to re-enable battery-saving sentinel rotation
+        const val ALL_PHONES_ARE_SENTINELS = true
     }
 
     @Volatile
@@ -40,7 +44,12 @@ class LeaderDutyCoordinator(
         val sentinelNodeId = safeMembers[effectiveSentinelIndex]
 
         val isSentinelDisarmed = nowMs < sentinelDisarmedUntilMs
-        val isLocalSentinel = sentinelNodeId == localNodeId && !isSentinelDisarmed
+        // In hackathon mode, all phones are always sentinels
+        val isLocalSentinel = if (ALL_PHONES_ARE_SENTINELS) {
+            true
+        } else {
+            sentinelNodeId == localNodeId && !isSentinelDisarmed
+        }
 
         val duties = buildSet {
             add(MeshDuty.MESH_RELAY)
