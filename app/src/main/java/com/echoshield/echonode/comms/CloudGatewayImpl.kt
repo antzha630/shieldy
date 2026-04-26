@@ -168,6 +168,17 @@ class RetrofitCloudGateway private constructor(
 
             val payload = response.body() ?: return
             val incident = payload.incident ?: return
+            val mappedMessages = incident.authorityMessages.orEmpty().mapNotNull { msg ->
+                val text = msg.message?.trim().orEmpty()
+                if (text.isBlank()) return@mapNotNull null
+                ConversationMessage(
+                    id = msg.id ?: "${incident.id}-${msg.at ?: System.currentTimeMillis()}-${msg.sender ?: "unknown"}",
+                    sender = msg.sender ?: "Dispatcher",
+                    role = msg.role ?: "authority",
+                    message = text,
+                    at = msg.at ?: incident.updatedAt.orEmpty()
+                )
+            }
             _latestIncident.value = ServerIncidentUpdate(
                 incidentId = incident.id,
                 status = incident.status,
@@ -177,17 +188,11 @@ class RetrofitCloudGateway private constructor(
                 threatLatitude = incident.location?.latitude,
                 threatLongitude = incident.location?.longitude,
                 threatZones = buildThreatZones(incident),
-                authorityMessages = incident.authorityMessages.orEmpty().mapNotNull { msg ->
-                    val text = msg.message?.trim().orEmpty()
-                    if (text.isBlank()) return@mapNotNull null
-                    ConversationMessage(
-                        id = msg.id ?: "${incident.id}-${msg.at ?: System.currentTimeMillis()}-${msg.sender ?: "unknown"}",
-                        sender = msg.sender ?: "Dispatcher",
-                        role = msg.role ?: "authority",
-                        message = text,
-                        at = msg.at ?: incident.updatedAt.orEmpty()
-                    )
-                },
+                authorityMessages = mappedMessages,
+                liveUpdates = incident.liveUpdates.orEmpty().map { it.trim() }.filter { it.isNotBlank() }
+                    .ifEmpty {
+                        mappedMessages.takeLast(6).map { "${it.sender}: ${it.message}" }
+                    },
                 confirmedByCount = incident.confirmedByNodes?.size ?: 0,
                 updatedAt = incident.updatedAt.orEmpty()
             )
@@ -306,7 +311,8 @@ private data class IncidentDto(
     val location: LocationDto?,
     val confirmedByNodes: List<String>?,
     val observations: List<ObservationDto>?,
-    val authorityMessages: List<AuthorityMessageDto>?
+    val authorityMessages: List<AuthorityMessageDto>?,
+    val liveUpdates: List<String>?
 )
 
 private data class LocationDto(

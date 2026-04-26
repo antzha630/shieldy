@@ -101,10 +101,7 @@ class EchoOrchestrator(
                     threatLongitude = incident.threatLongitude ?: _uiState.value.threatLongitude,
                     threatZones = incident.threatZones,
                     conversationMessages = incident.authorityMessages.takeLast(30),
-                    liveUpdates = incident.authorityMessages
-                        .takeLast(6)
-                        .reversed()
-                        .map { "${it.at} - ${it.sender}: ${it.message}" },
+                    liveUpdates = incident.liveUpdates.takeLast(6),
                     // Scale radius by how many peers confirmed for easier map visualization.
                     threatRadiusMeters = (50.0 + incident.confirmedByCount * 20.0).coerceAtMost(250.0)
                 )

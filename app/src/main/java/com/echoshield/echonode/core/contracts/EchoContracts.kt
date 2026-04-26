@@ -166,6 +166,7 @@ data class ServerIncidentUpdate(
     val threatLongitude: Double?,
     val threatZones: List<ThreatZone>,
     val authorityMessages: List<ConversationMessage>,
+    val liveUpdates: List<String>,
     val confirmedByCount: Int,
     val updatedAt: String
 )

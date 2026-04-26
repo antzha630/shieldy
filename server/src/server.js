@@ -170,7 +170,7 @@ function createIncident(id, observedAtMs) {
     medicalBrief: "No medical notes received yet.",
     recommendedAction: "Monitor for peer confirmation.",
     dispatchNotifiedAt: null,
-    authoritySeededAt: null,
+    liveUpdates: [],
     notificationAttempts: []
   };
 }
@@ -225,7 +225,6 @@ function upsertIncident(envelope) {
   incident.medicalBrief = medicalBriefFor(incident);
 
   incidents.set(id, incident);
-  seedAuthorityMessages(incident);
   scheduleDispatchNotification(incident);
   return { incident, duplicate: isDuplicate };
 }
@@ -377,34 +376,6 @@ function medicalBriefFor(incident) {
   return `Reports mention ${injured} injured person(s) and ${companions} companion(s) near users who submitted notes.`;
 }
 
-function seedAuthorityMessages(incident) {
-  if (incident.status !== "CONFIRMED_RESPONSE" || incident.authoritySeededAt) {
-    return;
-  }
-
-  incident.authoritySeededAt = nowIso();
-  addAuthorityMessage(incident, {
-    sender: "EchoShield Dispatch",
-    role: "system",
-    message: "Confirmed multi-device gunshot response received. Incident opened in dispatch console."
-  });
-  addAuthorityMessage(incident, {
-    sender: "Police Dispatcher",
-    role: "authority",
-    message: "Nearest response unit assigned. Continue collecting location and safety reports."
-  });
-  addAuthorityMessage(incident, {
-    sender: "EMS Coordinator",
-    role: "medical",
-    message: "Medical staging requested. Send injured counts and room/location notes as available."
-  });
-  addAuthorityMessage(incident, {
-    sender: "Police Dispatcher",
-    role: "authority",
-    message: "Advise occupants to shelter unless a verified route away from the threat is available."
-  });
-}
-
 function addAuthorityMessage(incident, input) {
   const message = {
     id: crypto.randomUUID(),
@@ -445,13 +416,13 @@ function generateHeuristicAuthorityReply(incident, userMessage) {
 
 function clearIncidentNotifications(incident) {
   incident.authorityMessages = [];
-  incident.authoritySeededAt = null;
+  incident.liveUpdates = [];
   incident.notificationAttempts = [];
   incident.dispatchNotifiedAt = null;
   incident.updatedAt = nowIso();
 }
 
-function buildAgentContextPrompt(incident) {
+function incidentSnapshotForAgent(incident) {
   const latestNotes = incident.notes.slice(-5).map((note) => ({
     safetyStatus: note.safetyStatus,
     injuredCount: note.injuredCount,
@@ -465,6 +436,29 @@ function buildAgentContextPrompt(incident) {
     peers: obs.connectedPeerCount,
     at: obs.receivedAt
   }));
+  const latestChat = incident.authorityMessages.slice(-8).map((message) => ({
+    sender: message.sender,
+    role: message.role,
+    message: message.message,
+    at: message.at
+  }));
+
+  return {
+    incidentId: incident.id,
+    status: incident.status,
+    recommendedAction: incident.recommendedAction,
+    policeBrief: incident.policeBrief,
+    medicalBrief: incident.medicalBrief,
+    location: incident.location,
+    confirmedByNodes: incident.confirmedByNodes,
+    notes: latestNotes,
+    observations: latestObservations,
+    authorityMessages: latestChat
+  };
+}
+
+function buildAgentContextPrompt(incident) {
+  const snapshot = incidentSnapshotForAgent(incident);
 
   return [
     "You are EchoShield Responder, a concise emergency coordination assistant.",
@@ -473,17 +467,7 @@ function buildAgentContextPrompt(incident) {
     "Keep response <= 120 words. Bullet points are okay.",
     "",
     "INCIDENT DATA (JSON):",
-    JSON.stringify({
-      incidentId: incident.id,
-      status: incident.status,
-      recommendedAction: incident.recommendedAction,
-      policeBrief: incident.policeBrief,
-      medicalBrief: incident.medicalBrief,
-      location: incident.location,
-      confirmedByNodes: incident.confirmedByNodes,
-      notes: latestNotes,
-      observations: latestObservations
-    })
+    JSON.stringify(snapshot)
   ].join("\n");
 }
 
@@ -531,6 +515,94 @@ async function generateAgentReply(incident, userMessage) {
     console.warn("[relay] Gemini reply failed, falling back to heuristic:", error.message);
     return generateHeuristicAuthorityReply(incident, userMessage);
   }
+}
+
+function generateHeuristicLiveUpdates(incident) {
+  const updates = [];
+  updates.push(`Status: ${incident.status}.`);
+  updates.push(incident.recommendedAction);
+  updates.push(incident.policeBrief);
+  if (incident.medicalBrief && incident.medicalBrief !== "No medical notes received yet.") {
+    updates.push(incident.medicalBrief);
+  }
+  const latestNote = incident.notes.at(-1)?.note?.trim();
+  if (latestNote) {
+    updates.push(`Latest field note: ${latestNote}`);
+  }
+  return updates
+    .map((line) => String(line || "").trim())
+    .filter(Boolean)
+    .slice(0, 6);
+}
+
+function parseLiveUpdatesResponse(rawText) {
+  if (!rawText) return [];
+  const trimmed = rawText.trim();
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) {
+      return parsed.map((x) => String(x || "").trim()).filter(Boolean).slice(0, 6);
+    }
+  } catch {
+    // Fall through to line parsing.
+  }
+  return trimmed
+    .split("\n")
+    .map((line) => line.replace(/^[-*\d.\s]+/, "").trim())
+    .filter(Boolean)
+    .slice(0, 6);
+}
+
+async function generateAgentLiveUpdates(incident) {
+  if (!GEMINI_API_KEY) {
+    return generateHeuristicLiveUpdates(incident);
+  }
+
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+  const prompt = [
+    "You are generating the EchoShield map live-updates feed.",
+    "From the incident JSON below, output ONLY a JSON array of 3-6 short strings.",
+    "Each string should be concise, actionable, and prioritized by urgency.",
+    "Do not include markdown, labels, bullets, or explanation outside JSON.",
+    "",
+    "INCIDENT DATA (JSON):",
+    JSON.stringify(incidentSnapshotForAgent(incident))
+  ].join("\n");
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.2,
+          topP: 0.9,
+          maxOutputTokens: 220
+        }
+      })
+    });
+    if (!response.ok) {
+      throw new Error(`Gemini HTTP ${response.status}`);
+    }
+    const payload = await response.json();
+    const rawText = payload?.candidates?.[0]?.content?.parts
+      ?.map((part) => part?.text || "")
+      .join("\n")
+      .trim();
+    const parsed = parseLiveUpdatesResponse(rawText);
+    if (parsed.length) return parsed;
+    throw new Error("Gemini returned no usable live updates");
+  } catch (error) {
+    console.warn("[relay] Gemini live-updates failed, fallback used:", error.message);
+    return generateHeuristicLiveUpdates(incident);
+  }
+}
+
+async function refreshIncidentLiveUpdates(incident) {
+  const updates = await generateAgentLiveUpdates(incident);
+  incident.liveUpdates = updates;
+  incident.updatedAt = nowIso();
 }
 
 function dispatchMessageFor(incident) {
@@ -658,6 +730,7 @@ function publicIncident(incident) {
     ...incident,
     observationCount: incident.observations.length,
     authorityMessageCount: incident.authorityMessages.length,
+    liveUpdates: incident.liveUpdates || [],
     observations: incident.observations.slice(-25),
     notes: incident.notes.slice(-25),
     authorityMessages: incident.authorityMessages.slice(-50)
@@ -719,6 +792,7 @@ async function handleAlert(req, res) {
   }
 
   const { incident, duplicate } = upsertIncident(envelope);
+  await refreshIncidentLiveUpdates(incident);
   logAlertReceipt(envelope, incident, duplicate);
   json(res, duplicate ? 200 : 202, {
     ok: true,
@@ -751,6 +825,7 @@ async function handleIncidentReport(req, res) {
   }
 
   const { incident, note, duplicate } = upsertIncidentReport(report);
+  await refreshIncidentLiveUpdates(incident);
   logIncidentReport(report, incident, note, duplicate);
   json(res, duplicate ? 200 : 202, {
     ok: true,
@@ -801,6 +876,7 @@ async function handleNote(req, res, incidentId) {
   incident.updatedAt = nowIso();
   incident.medicalBrief = medicalBriefFor(incident);
   incident.policeBrief = policeBriefFor(incident);
+  await refreshIncidentLiveUpdates(incident);
   incidents.set(incident.id, incident);
 
   json(res, 202, {
@@ -853,6 +929,7 @@ async function handleAuthorityMessage(req, res, incidentId) {
     });
   }
 
+  await refreshIncidentLiveUpdates(incident);
   incidents.set(incident.id, incident);
   json(res, 202, {
     ok: true,
