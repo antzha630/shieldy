@@ -66,22 +66,7 @@ fun EchoShieldRoot() {
         mutableStateOf(checkAllPermissions(context))
     }
 
-    val requiredPermissions = buildList {
-        add(Manifest.permission.RECORD_AUDIO)
-        add(Manifest.permission.ACCESS_FINE_LOCATION)
-        add(Manifest.permission.ACCESS_COARSE_LOCATION)
-        
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            add(Manifest.permission.BLUETOOTH_ADVERTISE)
-            add(Manifest.permission.BLUETOOTH_CONNECT)
-            add(Manifest.permission.BLUETOOTH_SCAN)
-        }
-        
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            add(Manifest.permission.POST_NOTIFICATIONS)
-            add(Manifest.permission.NEARBY_WIFI_DEVICES)
-        }
-    }
+    val requiredPermissions = requiredRuntimePermissions()
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -234,18 +219,24 @@ fun EchoShieldRoot() {
 }
 
 private fun checkAllPermissions(context: android.content.Context): Boolean {
-    val requiredPermissions = buildList {
-        add(Manifest.permission.RECORD_AUDIO)
-        add(Manifest.permission.ACCESS_FINE_LOCATION)
-        
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            add(Manifest.permission.BLUETOOTH_ADVERTISE)
-            add(Manifest.permission.BLUETOOTH_CONNECT)
-            add(Manifest.permission.BLUETOOTH_SCAN)
-        }
+    return requiredRuntimePermissions().all { permission ->
+        ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+    }
+}
+
+private fun requiredRuntimePermissions(): List<String> = buildList {
+    add(Manifest.permission.RECORD_AUDIO)
+    add(Manifest.permission.ACCESS_FINE_LOCATION)
+    add(Manifest.permission.ACCESS_COARSE_LOCATION)
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        add(Manifest.permission.BLUETOOTH_ADVERTISE)
+        add(Manifest.permission.BLUETOOTH_CONNECT)
+        add(Manifest.permission.BLUETOOTH_SCAN)
     }
 
-    return requiredPermissions.all { permission ->
-        ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        add(Manifest.permission.NEARBY_WIFI_DEVICES)
+        add(Manifest.permission.POST_NOTIFICATIONS)
     }
 }

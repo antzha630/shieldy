@@ -8,6 +8,7 @@ import com.echoshield.echonode.comms.CloudRelayResult
 import com.echoshield.echonode.comms.DutyAssignment
 import com.echoshield.echonode.comms.LeaderDutyCoordinator
 import com.echoshield.echonode.comms.RetrofitCloudRelayClient
+import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.nearby.Nearby
 import com.google.android.gms.nearby.connection.AdvertisingOptions
 import com.google.android.gms.nearby.connection.ConnectionInfo
@@ -124,6 +125,8 @@ class MeshNetworkManager(context: Context) {
 
     private var isAdvertising = false
     private var isDiscovering = false
+    @Volatile
+    private var isMeshStarted = false
     private var dutyRotationJob: Job? = null
     private var voteCleanupJob: Job? = null
 
@@ -146,12 +149,12 @@ class MeshNetworkManager(context: Context) {
                     Log.d(TAG, "Accepted connection with $endpointId")
                 }.addOnFailureListener { e ->
                     connectingEndpointIds.remove(endpointId)
-                    Log.e(TAG, "Failed to accept connection with $endpointId", e)
+                    Log.e(TAG, "Failed to accept connection with $endpointId (${nearbyErrorDetails(e)})", e)
                     _meshStatus.value = MeshStatus.ERROR
                 }
             }.onFailure { e ->
                 connectingEndpointIds.remove(endpointId)
-                Log.e(TAG, "Failed to accept connection with $endpointId", e)
+                Log.e(TAG, "Failed to accept connection with $endpointId (${nearbyErrorDetails(e)})", e)
                 _meshStatus.value = MeshStatus.ERROR
             }
         }
@@ -178,7 +181,7 @@ class MeshNetworkManager(context: Context) {
 
                 ConnectionsStatusCodes.STATUS_ERROR -> {
                     pendingEndpointNames.remove(endpointId)
-                    Log.e(TAG, "Connection error with: $endpointId")
+                    Log.e(TAG, "Connection error with: $endpointId (STATUS_ERROR)")
                     _meshStatus.value = MeshStatus.ERROR
                 }
 
@@ -236,12 +239,12 @@ class MeshNetworkManager(context: Context) {
                     Log.d(TAG, "Requested connection to $endpointId")
                 }.addOnFailureListener { e ->
                     connectingEndpointIds.remove(endpointId)
-                    Log.e(TAG, "Failed to request connection to $endpointId", e)
+                    Log.e(TAG, "Failed to request connection to $endpointId (${nearbyErrorDetails(e)})", e)
                     updateMeshStatus()
                 }
             }.onFailure { e ->
                 connectingEndpointIds.remove(endpointId)
-                Log.e(TAG, "Failed to request connection to $endpointId", e)
+                Log.e(TAG, "Failed to request connection to $endpointId (${nearbyErrorDetails(e)})", e)
                 _meshStatus.value = MeshStatus.ERROR
             }
         }
@@ -320,12 +323,12 @@ class MeshNetworkManager(context: Context) {
                 isAdvertising = true
                 updateMeshStatus()
             }.addOnFailureListener { e ->
-                Log.e(TAG, "Failed to start advertising", e)
+                Log.e(TAG, "Failed to start advertising (${nearbyErrorDetails(e)})", e)
                 isAdvertising = false
                 _meshStatus.value = MeshStatus.ERROR
             }
         }.onFailure { e ->
-            Log.e(TAG, "Failed to start advertising", e)
+            Log.e(TAG, "Failed to start advertising (${nearbyErrorDetails(e)})", e)
             isAdvertising = false
             _meshStatus.value = MeshStatus.ERROR
         }
@@ -353,12 +356,12 @@ class MeshNetworkManager(context: Context) {
                 isDiscovering = true
                 updateMeshStatus()
             }.addOnFailureListener { e ->
-                Log.e(TAG, "Failed to start discovery", e)
+                Log.e(TAG, "Failed to start discovery (${nearbyErrorDetails(e)})", e)
                 isDiscovering = false
                 _meshStatus.value = MeshStatus.ERROR
             }
         }.onFailure { e ->
-            Log.e(TAG, "Failed to start discovery", e)
+            Log.e(TAG, "Failed to start discovery (${nearbyErrorDetails(e)})", e)
             isDiscovering = false
             _meshStatus.value = MeshStatus.ERROR
         }
@@ -367,6 +370,12 @@ class MeshNetworkManager(context: Context) {
     private var meshRetryJob: Job? = null
 
     fun startMesh() {
+        if (isMeshStarted) {
+            Log.d(TAG, "startMesh ignored; mesh already started")
+            return
+        }
+        isMeshStarted = true
+        Log.i(TAG, "startMesh: node=$localEndpointName")
         startDutyRotation()
         startVoteCleanup()
         startAdvertising()
@@ -400,6 +409,7 @@ class MeshNetworkManager(context: Context) {
     }
 
     fun stopMesh() {
+        isMeshStarted = false
         meshRetryJob?.cancel()
         meshRetryJob = null
         stopDutyRotation()
@@ -1205,5 +1215,11 @@ class MeshNetworkManager(context: Context) {
     private fun stopVoteCleanup() {
         voteCleanupJob?.cancel()
         voteCleanupJob = null
+    }
+
+    private fun nearbyErrorDetails(throwable: Throwable): String {
+        val api = throwable as? ApiException ?: return throwable.javaClass.simpleName
+        val code = api.statusCode
+        return "code=$code(${ConnectionsStatusCodes.getStatusCodeString(code)})"
     }
 }
