@@ -375,15 +375,15 @@ function addUnique(list, value) {
 
 function recommendationFor(incident) {
   if (incident.status === "CONFIRMED_RESPONSE") {
-    return "Recommend law enforcement/EMS dispatch, push area guidance, continue receiving mesh observations.";
+    return "Confirmed multi-node threat alert. Use live responder guidance for next steps.";
   }
   if (incident.status === "EVACUATE") {
-    return `Evacuation route active${incident.routes[0] ? `: ${incident.routes[0]}` : ""}.`;
+    return incident.routes[0] ? `Evacuation route active: ${incident.routes[0]}.` : "Evacuation signal received. Await route details.";
   }
   if (incident.status === "CLEARED") {
-    return "Incident cleared by mesh all-clear packet.";
+    return "All-clear signal received from mesh.";
   }
-  return "Potential threat detected. Wait for peer confirmation before dispatch escalation.";
+  return "Initial threat detection received. Await corroboration.";
 }
 
 function policeBriefFor(incident) {
@@ -485,11 +485,13 @@ function incidentSnapshotForAgent(incident) {
   return {
     incidentId: incident.id,
     status: incident.status,
-    recommendedAction: incident.recommendedAction,
-    policeBrief: incident.policeBrief,
-    medicalBrief: incident.medicalBrief,
+    dispatchRecommended: incident.dispatchRecommended,
+    dispatchNotifiedAt: incident.dispatchNotifiedAt,
+    deviceCount: incident.devices.length,
+    confirmedByNodeCount: incident.confirmedByNodes.length,
     location: incident.location,
-    confirmedByNodes: incident.confirmedByNodes,
+    zones: incident.zones,
+    routes: incident.routes,
     notes: latestNotes,
     observations: latestObservations,
     authorityMessages: latestChat
@@ -507,6 +509,7 @@ function buildAgentContextPrompt(incident) {
     "When the data only comes from gunshot detection, say confirmed threat alert or reported shot origin, not confirmed shooter.",
     "Do not say police, law enforcement, EMS, or dispatchers have been dispatched unless dispatch notification data confirms it.",
     "If dispatch is only recommended, say dispatch recommended.",
+    "Respond in your own words; do not parrot field names or canned recommendation text.",
     "Prioritize immediate safety, practical next actions, and one focused follow-up question.",
     "If user asks for unknown info, say what is missing and ask one focused follow-up question.",
     "Never claim law enforcement is physically present unless data says so.",
@@ -835,7 +838,7 @@ async function generateAgentReply(incident, userMessage) {
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
         config: {
           systemInstruction: systemPrompt,
-          temperature: 0.2,
+          temperature: 0.35,
           topP: 0.9,
           maxOutputTokens: 640,
           responseMimeType: "application/json",
@@ -862,18 +865,16 @@ async function generateAgentReply(incident, userMessage) {
     }
 
     // One retry with stricter anti-echo instruction before heuristic fallback.
+    const summary = incidentSnapshotForAgent(incident);
     const retryPrompt = [
       "Return only JSON with a message field.",
       "The message must be plain text: no markdown, no bold, no bullets, no URGENT label.",
-      "Use only the incident summary. Do not invent shooter proximity or official response.",
+      "Use only the incident facts. Do not invent shooter proximity or official response.",
       "Do not say police/EMS have been dispatched unless the summary explicitly says dispatch notification was sent.",
       "Give 2-4 short sentences for immediate safety and one missing-info question.",
       "",
-      "INCIDENT SUMMARY:",
-      `Status: ${incident.status}`,
-      `Recommended Action: ${incident.recommendedAction || "n/a"}`,
-      `Police Brief: ${incident.policeBrief || "n/a"}`,
-      `Medical Brief: ${incident.medicalBrief || "n/a"}`,
+      "INCIDENT FACTS:",
+      JSON.stringify(summary),
       "",
       `USER MESSAGE: ${userPrompt}`
     ].join("\n");
@@ -882,7 +883,7 @@ async function generateAgentReply(incident, userMessage) {
       contents: [{ role: "user", parts: [{ text: retryPrompt }] }],
       config: {
         systemInstruction: "You are a calm emergency assistant. Output only the requested JSON object.",
-        temperature: 0.1,
+        temperature: 0.2,
         topP: 0.8,
         maxOutputTokens: 640,
         responseMimeType: "application/json",
@@ -931,14 +932,18 @@ function generateHeuristicLiveUpdates(incident) {
     updates.push(text);
   };
 
-  // Always include operational baseline first.
-  push(`Status: ${incident.status}.`);
-  push(incident.recommendedAction);
+  if (incident.status === "CONFIRMED_RESPONSE") {
+    const confirmed = incident.confirmedByNodes.length || incident.devices.length || 1;
+    push(`Threat alert corroborated by ${confirmed} node${confirmed === 1 ? "" : "s"}.`);
+  } else if (incident.status === "DETECTED") {
+    push("Initial threat detection received; waiting for corroboration.");
+  } else if (incident.status === "EVACUATE") {
+    push(incident.routes[0] ? `Evacuation route reported: ${incident.routes[0]}.` : "Evacuation signal received; route details pending.");
+  } else if (incident.status === "CLEARED") {
+    push("All-clear signal received from the mesh.");
+  }
   if (incident.location) {
     push(`Reported shot origin: ${incident.location.latitude.toFixed(5)}, ${incident.location.longitude.toFixed(5)}.`);
-  }
-  if (incident.confirmedByNodes.length || incident.devices.length) {
-    push(`Observed by ${incident.devices.length} device(s), confirmed by ${incident.confirmedByNodes.length} node(s).`);
   }
   if (incident.zones.length) {
     push(`Threat zone: ${incident.zones.slice(0, 2).join(", ")}.`);
@@ -967,6 +972,9 @@ function generateHeuristicLiveUpdates(incident) {
   // Keep responder briefs lower in feed than direct reports.
   if (incident.medicalBrief && incident.medicalBrief !== "No medical notes received yet.") {
     push(incident.medicalBrief);
+  }
+  if (incident.status === "CONFIRMED_RESPONSE") {
+    push("Shelter in place, stay low, silence your phone, and keep sending concrete updates if safe.");
   }
 
   return sanitizeLiveUpdates(updates, incident);
@@ -1134,26 +1142,22 @@ async function generateAgentLiveUpdates(incident) {
 
   const snapshot = incidentSnapshotForAgent(incident);
   const prompt = [
-    "Output a JSON array of 3-6 emergency update strings for a live map feed.",
-    "Each string: short, actionable, user-facing. No markdown, no explanation.",
-    "Prioritize: injuries, shooter location, blocked exits, room-level info.",
+    "Write a live incident feed as a JSON array of 3-6 short strings.",
+    "Use natural, varied wording. Do not copy field names or canned status text.",
+    "Prioritize concrete reports: injuries, reported threat direction/location, blocked exits, rooms, and confidence.",
     "Do not invent blocked exits, compromised exits, evacuation routes, or official responder movement.",
-    "Example output format: [\"Active threat north wing\", \"2 injured room 204\", \"East exit blocked\"]",
+    "If the facts are sparse, say what is known and what is still unconfirmed.",
     "",
-    "Incident:",
-    `Status: ${snapshot.status}`,
-    `Action: ${snapshot.recommendedAction}`,
-    snapshot.location ? `Location: ${snapshot.location.latitude}, ${snapshot.location.longitude}` : "",
-    snapshot.notes?.length ? `Notes: ${JSON.stringify(snapshot.notes.slice(-3))}` : "",
-    snapshot.authorityMessages?.length ? `Reports: ${JSON.stringify(snapshot.authorityMessages.slice(-3))}` : ""
+    "Incident facts:",
+    JSON.stringify(snapshot)
   ].filter(Boolean).join("\n");
 
   const askModel = (userPrompt, maxOutputTokens = 640) => generateWithModelFallback(() => ({
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
         config: {
-          systemInstruction: "Return ONLY a JSON array of strings. No other text, no explanation, no markdown. Do not invent official responder movement or blocked exits.",
-          temperature: 0.1,
-          topP: 0.8,
+          systemInstruction: "Return only the requested JSON array of strings. Be concise, factual, and naturally worded. Do not invent official responder movement or blocked exits.",
+          temperature: 0.35,
+          topP: 0.9,
           maxOutputTokens,
           responseMimeType: "application/json",
           responseJsonSchema: LIVE_UPDATES_RESPONSE_SCHEMA
