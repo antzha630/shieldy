@@ -16,11 +16,11 @@ const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || "";
 const SENDGRID_FROM = process.env.SENDGRID_FROM || "";
 const DISPATCH_EMAIL_TO = process.env.DISPATCH_EMAIL_TO || "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemma-3-27b-it";
 const GEMINI_MODEL_FALLBACKS = [
   "gemma-3-27b-it",
-  "gemini-1.5-flash",
-  "gemini-1.5-pro"
+  "gemma-3-12b-it",
+  "gemma-2-9b-it"
 ];
 
 const incidents = new Map();
@@ -485,6 +485,18 @@ function buildAgentContextPrompt(incident) {
   ].join("\n");
 }
 
+function isPromptEchoResponse(text) {
+  const value = String(text || "").toLowerCase();
+  if (!value) return true;
+  return (
+    value.includes("incident data (json)") ||
+    value.includes("use only provided json data") ||
+    value.includes("echoshield responder (concise emergency coordination assistant)") ||
+    value.includes("* incidentid:") ||
+    value.includes("constraint check")
+  );
+}
+
 function orderedModelCandidates() {
   const seen = new Set();
   const ordered = [];
@@ -542,18 +554,18 @@ async function generateAgentReply(incident, userMessage) {
   }
 
   const systemPrompt = buildAgentContextPrompt(incident);
-  const userPrompt = `USER MESSAGE:\n${String(userMessage || "").trim()}`;
+  const userPrompt = String(userMessage || "").trim();
 
   try {
     const { model, payload } = await generateWithModelFallback(() => ({
-        contents: [
-          { role: "user", parts: [{ text: systemPrompt }] },
-          { role: "user", parts: [{ text: userPrompt }] }
-        ],
+        system_instruction: {
+          parts: [{ text: systemPrompt }]
+        },
+        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
         generationConfig: {
-          temperature: 0.25,
+          temperature: 0.2,
           topP: 0.9,
-          maxOutputTokens: 220
+          maxOutputTokens: 180
         }
       }));
     const text = payload?.candidates?.[0]?.content?.parts
@@ -563,6 +575,9 @@ async function generateAgentReply(incident, userMessage) {
 
     if (!text) {
       throw new Error("Gemini returned empty text");
+    }
+    if (isPromptEchoResponse(text)) {
+      throw new Error("Model echoed prompt/context instead of returning answer");
     }
     console.info(`[relay] Agent reply model=${model}`);
     return text.slice(0, 1800);
@@ -669,11 +684,16 @@ async function generateAgentLiveUpdates(incident) {
 
   try {
     const { model, payload } = await generateWithModelFallback(() => ({
+        system_instruction: {
+          parts: [{
+            text: "Return only valid JSON array output. Never restate instructions or incident JSON."
+          }]
+        },
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
-          temperature: 0.2,
+          temperature: 0.15,
           topP: 0.9,
-          maxOutputTokens: 220
+          maxOutputTokens: 180
         }
       }));
     const rawText = payload?.candidates?.[0]?.content?.parts

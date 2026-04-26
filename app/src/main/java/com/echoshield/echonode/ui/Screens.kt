@@ -1116,7 +1116,7 @@ private fun IncidentChatTab(
 
     Column(
         modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.SpaceBetween
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -1129,7 +1129,9 @@ private fun IncidentChatTab(
         }
 
         Card(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
             colors = CardDefaults.cardColors(containerColor = CardWhite),
             shape = RoundedCornerShape(14.dp)
         ) {
@@ -1145,7 +1147,7 @@ private fun IncidentChatTab(
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(300.dp),
+                            .weight(1f, fill = false),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                         state = listState
                     ) {
