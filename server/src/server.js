@@ -128,6 +128,14 @@ function listValue(value) {
   return [String(value)];
 }
 
+function inferredConfirmationCountFromText(value) {
+  const text = String(value || "");
+  const match = text.match(/confirmed\s+by\s+(\d+)\s+(?:device|devices|node|nodes)/i);
+  if (!match) return 0;
+  const count = Number.parseInt(match[1], 10);
+  return Number.isFinite(count) ? count : 0;
+}
+
 function incidentIdFor(envelope, parsed) {
   if (envelope.sessionId || parsed.sessionId) {
     return `session-${envelope.sessionId || parsed.sessionId}`;
@@ -221,7 +229,19 @@ function upsertIncident(envelope) {
   ];
   confirmedByNodes.forEach((node) => addUnique(incident.confirmedByNodes, node));
 
+  const inferredConfirmedCount = Math.max(
+    inferredConfirmationCountFromText(envelope.body),
+    inferredConfirmationCountFromText(parsed.body),
+    inferredConfirmationCountFromText(envelope.payload)
+  );
+  for (let index = incident.confirmedByNodes.length; index < inferredConfirmedCount; index += 1) {
+    addUnique(incident.confirmedByNodes, `inferred-confirmed-${index + 1}`);
+  }
+
   applyStatus(incident, envelope.alertType || parsed.type);
+  if (inferredConfirmedCount >= 2 && incident.status !== "CLEARED") {
+    incident.status = "CONFIRMED_RESPONSE";
+  }
   incident.lastObservedAtMs = Math.max(incident.lastObservedAtMs, observedAtMs);
   incident.updatedAt = nowIso();
   incident.dispatchRecommended = incident.status === "CONFIRMED_RESPONSE";
