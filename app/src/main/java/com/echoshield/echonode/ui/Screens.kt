@@ -77,6 +77,7 @@ private val AccentGreen = Color(0xFF0D9F46)
 private val AccentYellow = Color(0xFFC79200)
 private val AccentRed = Color(0xFFDC3545)
 private val TrackGray = Color(0xFFD5DAE4)
+private const val INCIDENT_MAP_DEFAULT_ZOOM = 14f
 
 @Composable
 fun DashboardScreen(
@@ -645,9 +646,8 @@ fun IncidentReportScreen(
     ) {
         FlowHeader(
             title = "Incident Response",
-            step = 3,
-            totalSteps = 3,
             showBackArrow = true,
+            showCancel = false,
             onBack = onBack,
             onCancel = onBack
         )
@@ -753,7 +753,7 @@ private fun IncidentMapTab(
             if (hasCoordinates) {
                 val point = LatLng(locationLatitude, locationLongitude)
                 val cameraState = rememberCameraPositionState {
-                    position = CameraPosition.fromLatLngZoom(point, 17f)
+                    position = CameraPosition.fromLatLngZoom(point, INCIDENT_MAP_DEFAULT_ZOOM)
                 }
                 GoogleMap(
                     modifier = Modifier.fillMaxSize(),
@@ -793,18 +793,11 @@ private fun IncidentMapTab(
             Column(modifier = Modifier.padding(14.dp)) {
                 SectionLabel("Live Updates")
                 Spacer(modifier = Modifier.height(8.dp))
-                LiveUpdateRow("Location: ${locationLabel.ifBlank { "Unknown" }}")
-                LiveUpdateRow("Area: ${relativeLocation.ifBlank { "Unknown" }}")
-                LiveUpdateRow("Mesh: ${meshStatus.name.lowercase()} ($connectedPeers peers)")
-                if (threatZone.isNotBlank()) {
-                    LiveUpdateRow("Threat Zone: $threatZone")
-                }
-                if (evacuationRoute.isNotBlank()) {
-                    LiveUpdateRow("Evacuation: $evacuationRoute")
-                }
-                if (locationTimestamp.isNotBlank()) {
-                    LiveUpdateRow("Updated: $locationTimestamp")
-                }
+                // TODO: Replace these hardcoded notifications with dynamic alert feed data.
+                LiveUpdateRow("17:40 - Notification: Emergency services have been alerted.")
+                LiveUpdateRow("17:41 - Notification: Shelter in place while route verification runs.")
+                LiveUpdateRow("17:42 - Notification: Nearby devices syncing incident state.")
+                LiveUpdateRow("17:43 - Notification: Awaiting next guidance update.")
             }
         }
     }
@@ -833,11 +826,6 @@ private fun IncidentChatTab(
                     text = if (meshStatus == MeshStatus.CONNECTED) "Active" else "Connecting",
                     color = SecondaryText,
                     fontSize = 13.sp
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = "Emergency response agent connected. Share updates for responders.",
-                    color = DarkText
                 )
             }
         }
@@ -1241,6 +1229,7 @@ private fun FlowHeader(
     step: Int = 0,
     totalSteps: Int = 0,
     showBackArrow: Boolean = false,
+    showCancel: Boolean = showBackArrow,
     onBack: () -> Unit = {},
     onCancel: () -> Unit = {}
 ) {
@@ -1278,7 +1267,7 @@ private fun FlowHeader(
                 )
             }
 
-            if (showBackArrow) {
+            if (showBackArrow && showCancel) {
                 TextButton(onClick = onCancel) {
                     Text("Cancel", color = PrimaryBlue, fontWeight = FontWeight.SemiBold)
                 }
@@ -1418,73 +1407,62 @@ private fun CounterRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(label, fontSize = 15.sp, color = DarkText, fontWeight = FontWeight.Medium)
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            OutlinedButton(
-                onClick = { onChange((value - 1).coerceAtLeast(0)) },
-                modifier = Modifier.size(40.dp),
-                shape = RoundedCornerShape(8.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
-            ) {
-                Text("−", fontSize = 18.sp)
-            }
-            Text(
-                text = value.toString(),
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.width(40.dp),
+        OutlinedTextField(
+            value = value.toString(),
+            onValueChange = { input ->
+                val digitsOnly = input.filter { it.isDigit() }
+                val parsed = digitsOnly.toIntOrNull() ?: 0
+                onChange(parsed)
+            },
+            modifier = Modifier.width(120.dp),
+            singleLine = true,
+            shape = RoundedCornerShape(8.dp),
+            textStyle = androidx.compose.ui.text.TextStyle(
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
                 textAlign = TextAlign.Center
-            )
-            OutlinedButton(
-                onClick = { onChange(value + 1) },
-                modifier = Modifier.size(40.dp),
-                shape = RoundedCornerShape(8.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
-            ) {
-                Text("+", fontSize = 18.sp)
-            }
-        }
+            ),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+        )
     }
 }
 
 @Composable
+@Suppress("UNUSED_PARAMETER")
 private fun EmergencyQuickActions(
     onQuickBarricade: () -> Unit,
     onQuickEvacuate: () -> Unit
 ) {
     Column {
         Text(
-            text = "Emergency Actions",
+            text = "Response Logic (Placeholder)",
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
             color = SecondaryText
         )
         Spacer(modifier = Modifier.height(8.dp))
-        Row(
+        Card(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFF5F7FB)),
+            shape = RoundedCornerShape(12.dp)
         ) {
-            Button(
-                onClick = onQuickBarricade,
+            Column(
                 modifier = Modifier
-                    .weight(1f)
-                    .height(48.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = AccentRed),
-                shape = RoundedCornerShape(12.dp)
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Text("Barricade Now", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-            }
-
-            OutlinedButton(
-                onClick = onQuickEvacuate,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(48.dp),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Text("Evacuate Now", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = AccentGreen)
+                Text(
+                    text = "Hardcoded placeholder box",
+                    fontWeight = FontWeight.SemiBold,
+                    color = DarkText,
+                    fontSize = 13.sp
+                )
+                Text(
+                    text = "TODO: Replace with conditional response actions based on classifier confidence, peer confirmations, and user distance from threat.",
+                    color = SecondaryText,
+                    fontSize = 12.sp
+                )
             }
         }
     }

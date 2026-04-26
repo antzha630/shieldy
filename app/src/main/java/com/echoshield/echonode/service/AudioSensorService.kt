@@ -107,8 +107,10 @@ class AudioSensorService : Service() {
     private var audioRecord: AudioRecord? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var meshNetworkManager: MeshNetworkManager
-    private lateinit var gunshotClassifier: GunshotClassifier
+    private lateinit var gunshotClassifier: ZeticGunshotClassifier
     private var locationProvider: LocationProvider? = null
+    @Volatile
+    private var classifierReady = false
     
     // Two-tier detector state
     private var lastTriggerTime = 0L
@@ -140,10 +142,14 @@ class AudioSensorService : Service() {
         createNotificationChannel()
         acquireWakeLock()
         meshNetworkManager = MeshNetworkManager.getInstance(applicationContext)
-        gunshotClassifier = GunshotClassifier(applicationContext)
+        gunshotClassifier = ZeticGunshotClassifier(applicationContext)
         locationProvider = LocationProvider(applicationContext)
-        val modelInitialized = gunshotClassifier.initialize()
-        Log.i(TAG, "Gunshot classifier initialized: $modelInitialized")
+        
+        serviceScope.launch {
+            val modelInitialized = gunshotClassifier.initialize()
+            classifierReady = modelInitialized
+            Log.i(TAG, "Zetic gunshot classifier initialized: $modelInitialized")
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -234,6 +240,12 @@ class AudioSensorService : Service() {
         serviceScope.launch(Dispatchers.IO) {
             try {
                 isProcessingWakeRequest = true
+                
+                if (!classifierReady) {
+                    Log.w(TAG, "Classifier not ready for wake vote, voting NO for $sessionId")
+                    meshNetworkManager.submitClassifyVote(sessionId, false, 0f)
+                    return@launch
+                }
                 
                 // Use wake buffer if we captured fresh audio, otherwise use rolling buffer
                 val modelInput = if (wakeBufferFilled) {
@@ -518,8 +530,8 @@ class AudioSensorService : Service() {
                     }
                 }
 
-                // TIER 2: ML inference only when gate is open and rate limit allows
-                val shouldRunModel = gateOpen &&
+                // TIER 2: ML inference only when gate is open, classifier ready, and rate limit allows
+                val shouldRunModel = gateOpen && classifierReady &&
                     (currentTime - lastModelInference >= MODEL_INFERENCE_INTERVAL_MS)
 
                 if (shouldRunModel) {

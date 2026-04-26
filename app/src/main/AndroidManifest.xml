@@ -4,6 +4,10 @@
 
     <!-- Audio Recording for Threat Detection -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    
+    <!-- Storage for debug testing -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" 
+        android:maxSdkVersion="32" />
 
     <!-- Location Permissions - Required for Nearby Connections API -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />

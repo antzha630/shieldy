@@ -12,6 +12,7 @@ val localProperties = Properties().apply {
     }
 }
 val mapsApiKey = (localProperties.getProperty("MAPS_API_KEY") ?: "").trim()
+val zeticPersonalKey = (localProperties.getProperty("ZETIC_PERSONAL_KEY") ?: "").trim()
 
 android {
     namespace = "com.echoshield.echonode"
@@ -19,11 +20,13 @@ android {
 
     defaultConfig {
         applicationId = "com.echoshield.echonode"
-        minSdk = 29
+        minSdk = 31
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0-mvp"
         manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
+
+        buildConfigField("String", "ZETIC_KEY", "\"$zeticPersonalKey\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -52,6 +55,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {
@@ -65,6 +69,9 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 }
@@ -104,8 +111,8 @@ dependencies {
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
-    // On-device audio ML inference
-    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    // On-device audio ML inference (Zetic Melange with NPU acceleration)
+    implementation("com.zeticai.mlange:mlange:1.6.1+")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

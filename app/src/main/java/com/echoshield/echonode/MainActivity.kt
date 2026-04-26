@@ -30,9 +30,7 @@ import com.echoshield.echonode.ui.BarricadeScreen
 import com.echoshield.echonode.ui.DashboardScreen
 import com.echoshield.echonode.ui.EvacuateScreen
 import com.echoshield.echonode.ui.IncidentReportScreen
-import com.echoshield.echonode.ui.LocationConfirmationScreen
 import com.echoshield.echonode.ui.PermissionRequestScreen
-import com.echoshield.echonode.ui.SafetyCheckScreen
 import com.echoshield.echonode.ui.theme.EchoNodeTheme
 import com.echoshield.echonode.viewmodel.MainViewModel
 
@@ -135,26 +133,54 @@ fun EchoShieldRoot() {
                 )
             }
             AppState.LOCATION_CONFIRMATION.name -> {
-                LocationConfirmationScreen(
+                IncidentReportScreen(
                     locationLabel = uiState.locationLabel,
                     relativeLocation = uiState.relativeLocation,
-                    coordinateText = uiState.coordinateText,
                     locationTimestamp = uiState.locationTimestamp,
                     locationLatitude = uiState.locationLatitude,
                     locationLongitude = uiState.locationLongitude,
-                    onConfirm = { isConfirmed -> viewModel.confirmLocation(isConfirmed) },
+                    safetyStatus = uiState.safetyStatus,
+                    connectedPeers = uiState.connectedPeers,
+                    meshStatus = uiState.meshStatus,
+                    threatZone = uiState.threatZone,
+                    evacuationRoute = uiState.evacuationRoute,
+                    companionsCount = uiState.companionsCount,
+                    injuredCount = uiState.injuredCount,
+                    roomNumber = uiState.roomNumber,
+                    incidentNotes = uiState.incidentNotes,
+                    onCompanionsChange = { count -> viewModel.setCompanionsCount(count) },
+                    onInjuredChange = { count -> viewModel.setInjuredCount(count) },
+                    onRoomNumberChange = { room -> viewModel.setRoomNumber(room) },
+                    onNotesChange = { notes -> viewModel.setIncidentNotes(notes) },
+                    onSubmit = { viewModel.submitIncidentReport() },
+                    onBack = { viewModel.resetAlert() },
                     onQuickBarricade = { viewModel.quickBarricade() },
                     onQuickEvacuate = { viewModel.quickEvacuate() },
-                    onCancel = { viewModel.resetAlert() },
                     modifier = Modifier.fillMaxSize()
                 )
             }
             AppState.SAFETY_CHECK.name -> {
-                SafetyCheckScreen(
-                    selectedStatus = uiState.safetyStatus,
-                    onStatusSelected = { status -> viewModel.selectSafetyStatus(status) },
-                    onNext = { viewModel.continueToIncidentReport() },
-                    onBack = { viewModel.goBackToLocation() },
+                IncidentReportScreen(
+                    locationLabel = uiState.locationLabel,
+                    relativeLocation = uiState.relativeLocation,
+                    locationTimestamp = uiState.locationTimestamp,
+                    locationLatitude = uiState.locationLatitude,
+                    locationLongitude = uiState.locationLongitude,
+                    safetyStatus = uiState.safetyStatus,
+                    connectedPeers = uiState.connectedPeers,
+                    meshStatus = uiState.meshStatus,
+                    threatZone = uiState.threatZone,
+                    evacuationRoute = uiState.evacuationRoute,
+                    companionsCount = uiState.companionsCount,
+                    injuredCount = uiState.injuredCount,
+                    roomNumber = uiState.roomNumber,
+                    incidentNotes = uiState.incidentNotes,
+                    onCompanionsChange = { count -> viewModel.setCompanionsCount(count) },
+                    onInjuredChange = { count -> viewModel.setInjuredCount(count) },
+                    onRoomNumberChange = { room -> viewModel.setRoomNumber(room) },
+                    onNotesChange = { notes -> viewModel.setIncidentNotes(notes) },
+                    onSubmit = { viewModel.submitIncidentReport() },
+                    onBack = { viewModel.resetAlert() },
                     onQuickBarricade = { viewModel.quickBarricade() },
                     onQuickEvacuate = { viewModel.quickEvacuate() },
                     modifier = Modifier.fillMaxSize()
