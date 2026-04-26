@@ -97,7 +97,6 @@ private const val INCIDENT_MAP_DEFAULT_ZOOM = 14f
 fun DashboardScreen(
     uiState: MainViewModel.UiState,
     onSimulateGunshot: () -> Unit,
-    onToggleEvacuate: () -> Unit,
     onThresholdChange: (Double) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -324,15 +323,6 @@ fun DashboardScreen(
                         )
                     )
 
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    OutlinedButton(
-                        onClick = onToggleEvacuate,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(10.dp)
-                    ) {
-                        Text("Test Evacuate", color = AccentGreen)
-                    }
                 }
             }
         }

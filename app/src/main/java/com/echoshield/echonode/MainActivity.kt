@@ -110,7 +110,6 @@ fun EchoShieldRoot() {
                 DashboardScreen(
                     uiState = uiState,
                     onSimulateGunshot = { viewModel.triggerManualDebugAlert() },
-                    onToggleEvacuate = { viewModel.triggerEvacuate() },
                     onThresholdChange = { viewModel.setDetectionThreshold(it) },
                     modifier = Modifier.fillMaxSize()
                 )
