@@ -1911,6 +1911,348 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Opius — mobile-framed user-facing client (the cross-platform / iOS relay app).
+// Faithful to the Opius prototype (Home / Chat / Update tabs) but wired to the
+// live relay endpoints instead of mock state. Served at GET /app.
+// ─────────────────────────────────────────────────────────────────────────────
+function opiusAppHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0A0A0A">
+<title>Opius</title>
+<style>
+  :root {
+    --accent: oklch(56% 0.2 258);
+    --danger: oklch(55% 0.19 25);
+    --danger-light: oklch(94% 0.05 25);
+    --warning: oklch(78% 0.14 75);
+    --warning-light: oklch(95% 0.05 80);
+    --safe: oklch(64% 0.15 145);
+    --safe-light: oklch(94% 0.05 145);
+    --text: oklch(20% 0.01 260);
+    --text-2: oklch(48% 0.01 260);
+    --text-3: oklch(65% 0.01 260);
+    --bg: oklch(96% 0.004 260);
+    --border: oklch(90% 0.005 260);
+    --card: #ffffff;
+  }
+  @keyframes opiusPulse { 0% { opacity:.55; transform:scale(1); } 100% { opacity:0; transform:scale(2.4); } }
+  @keyframes opiusBlink { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; padding:0; height:100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg); color: var(--text);
+    display:flex; flex-direction:column; height:100dvh; overflow:hidden;
+  }
+  #topAlert {
+    position:fixed; top:calc(env(safe-area-inset-top) + 8px); left:12px; right:12px; z-index:30;
+    background: var(--warning-light); border:1px solid var(--warning); color: oklch(35% 0.1 75);
+    padding:9px 14px; border-radius:12px; font-size:12px; font-weight:600;
+    box-shadow:0 6px 16px rgba(0,0,0,.12); display:none;
+  }
+  header {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:calc(env(safe-area-inset-top) + 10px) 20px 12px; background:var(--card);
+    border-bottom:1px solid var(--border); flex-shrink:0;
+  }
+  .brand { display:flex; align-items:center; gap:8px; }
+  .brand .mark { width:22px; height:22px; border-radius:7px; background:var(--accent); }
+  .brand .name { font-size:21px; font-weight:800; letter-spacing:-.3px; }
+  .pill { display:flex; align-items:center; gap:6px; padding:6px 12px; border-radius:999px; font-size:12px; font-weight:700; }
+  .pill .dot { width:6px; height:6px; border-radius:999px; }
+  main { flex:1; overflow:auto; -webkit-overflow-scrolling:touch; }
+  .tab { display:none; }
+  .tab.active { display:block; }
+  .center { height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:22px; padding:0 40px; text-align:center; }
+  .radar { position:relative; width:96px; height:96px; display:flex; align-items:center; justify-content:center; }
+  .radar .ring { position:absolute; inset:0; border-radius:999px; background:var(--accent); opacity:.35; animation:opiusPulse 2.4s ease-out infinite; }
+  .radar .ring.d { inset:14px; opacity:.5; animation-delay:.8s; }
+  .radar .core { width:22px; height:22px; border-radius:7px; background:var(--accent); }
+  h2.section { font-size:17px; font-weight:800; margin:0; }
+  .row { display:flex; align-items:center; justify-content:space-between; }
+  .btn-pill { border:1px solid var(--accent); color:var(--accent); background:#fff; font-size:12px; font-weight:700; padding:7px 13px; border-radius:999px; }
+  .card { background:var(--card); border-radius:14px; box-shadow:0 1px 6px rgba(0,0,0,.06); }
+  .update { margin:0 20px 10px; padding:12px 14px; border-radius:12px; background:var(--card); box-shadow:0 1px 6px rgba(0,0,0,.06); border-left:4px solid var(--accent); }
+  .update.critical { border-left-color: var(--danger); }
+  .update .meta { display:flex; justify-content:space-between; align-items:baseline; }
+  .update .src { font-size:12.5px; font-weight:700; }
+  .update .time { font-size:10.5px; color:var(--text-3); }
+  .update .txt { font-size:13px; color:var(--text-2); margin-top:3px; line-height:1.4; }
+  .summary { margin:0 20px 12px; padding:14px; border-radius:14px; background:var(--danger-light); border-left:4px solid var(--danger); }
+  .summary .k { font-size:10.5px; font-weight:800; letter-spacing:.06em; color:oklch(45% 0.19 25); margin-bottom:4px; }
+  .summary .v { font-size:13.5px; font-weight:600; line-height:1.4; }
+  .firstaid { margin:0 20px 14px; padding:14px; border-radius:14px; background:var(--card); box-shadow:0 1px 6px rgba(0,0,0,.06); }
+  .firstaid .k { font-size:10.5px; font-weight:800; letter-spacing:.06em; color:oklch(45% 0.1 145); margin-bottom:6px; }
+  .firstaid .head { font-size:13.5px; font-weight:700; margin-bottom:8px; }
+  .firstaid ol { margin:0; padding-left:18px; }
+  .firstaid li { font-size:12.5px; color:var(--text-2); line-height:1.45; margin-bottom:6px; }
+  .firstaid .disc { font-size:11px; color:var(--text-3); margin-top:6px; }
+  .empty { margin:0 20px 20px; padding:22px 14px; text-align:center; color:var(--text-3); font-size:12.5px; background:var(--card); border-radius:14px; }
+  .msg { display:flex; margin:0 20px; }
+  .bubble { max-width:78%; padding:10px 14px; border-radius:16px; font-size:13.5px; line-height:1.4; }
+  .msg.bot { justify-content:flex-start; } .msg.bot .bubble { background:#F1F0EE; color:var(--text); }
+  .msg.user { justify-content:flex-end; } .msg.user .bubble { background:var(--accent); color:#fff; }
+  .quickrow { display:flex; gap:8px; padding:8px 20px; overflow-x:auto; }
+  .quickrow .btn-pill { white-space:nowrap; flex-shrink:0; font-weight:600; }
+  .composer { display:flex; gap:8px; align-items:center; padding:10px 16px calc(env(safe-area-inset-bottom) + 10px); border-top:1px solid var(--border); background:#fff; }
+  .composer input { flex:1; padding:10px 14px; border-radius:20px; border:1px solid var(--border); font-size:13.5px; outline:none; }
+  .send { width:38px; height:38px; border-radius:19px; background:var(--accent); color:#fff; border:none; font-size:16px; font-weight:700; flex-shrink:0; }
+  .field { padding:0 20px; }
+  label.f { display:block; font-size:12px; font-weight:700; color:var(--text-2); margin:16px 0 6px; }
+  select, input.f { width:100%; padding:11px 12px; border-radius:10px; border:1px solid var(--border); font-size:14px; background:#fff; }
+  .stepper { display:flex; align-items:center; gap:12px; }
+  .stepper button { width:30px; height:30px; border-radius:15px; border:1px solid var(--border); background:#fff; font-size:16px; }
+  .stepper .n { font-size:15px; font-weight:700; width:16px; text-align:center; }
+  .submit { width:calc(100% - 40px); margin:18px 20px; padding:14px; border-radius:12px; background:var(--accent); color:#fff; border:none; font-size:14.5px; font-weight:700; }
+  .sent { margin:0 20px 20px; padding:14px; border-radius:12px; background:var(--safe-light); }
+  .sent .k { font-size:13px; font-weight:700; color:oklch(35% 0.1 145); margin-bottom:4px; }
+  .sent .v { font-size:12.5px; color:var(--text-2); line-height:1.4; }
+  nav {
+    display:flex; height:56px; border-top:1px solid var(--border); background:#fff;
+    padding-bottom:env(safe-area-inset-bottom); flex-shrink:0;
+  }
+  nav button { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; background:none; border:none; color:var(--text-3); font-size:10.5px; font-weight:600; }
+  nav button.active { color:var(--accent); }
+  .title { padding:8px 20px 14px; }
+  .title .h { font-size:21px; font-weight:800; }
+  .title .s { font-size:12.5px; color:var(--text-2); margin-top:2px; }
+</style>
+</head>
+<body>
+  <div id="topAlert"></div>
+  <header>
+    <div class="brand"><div class="mark"></div><div class="name">Opius</div></div>
+    <div class="pill" id="statusPill"><span class="dot"></span><span id="statusText">Listening</span></div>
+  </header>
+
+  <main>
+    <!-- HOME -->
+    <section class="tab active" id="tab-home">
+      <div id="homeIdle" class="center">
+        <div class="radar"><div class="ring"></div><div class="ring d"></div><div class="core"></div></div>
+        <div style="font-size:22px;font-weight:800;letter-spacing:-.3px;">Opius</div>
+        <div class="pill" id="idlePill"><span class="dot"></span><span id="idlePillText">Listening</span></div>
+        <div style="font-size:13.5px;color:var(--text-3);line-height:1.5;max-width:240px;">Opius is quietly listening in the background. Nothing to see here — you'll be notified the moment something needs your attention.</div>
+      </div>
+      <div id="homeIncident" style="display:none;">
+        <div class="row" style="padding:14px 20px 10px;">
+          <h2 class="section">Live Updates</h2>
+          <button class="btn-pill" id="pullBtn">Refresh</button>
+        </div>
+        <div id="summary"></div>
+        <div id="firstAid"></div>
+        <div id="updates"></div>
+        <div style="height:16px;"></div>
+      </div>
+    </section>
+
+    <!-- CHAT -->
+    <section class="tab" id="tab-chat" style="height:100%;">
+      <div style="display:flex;flex-direction:column;height:100%;">
+        <div class="title"><div class="h">Opius Assistant</div><div class="s">Connected to the campus response team</div></div>
+        <div id="chatScroll" style="flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px;padding-bottom:10px;"></div>
+        <div class="quickrow">
+          <button class="btn-pill" data-quick="I'm safe.">I'm safe</button>
+          <button class="btn-pill" data-quick="I need help.">I need help</button>
+          <button class="btn-pill" data-quick="Someone is injured.">Someone's injured</button>
+          <button class="btn-pill" data-quick="Where is the shooter?">Where's the shooter?</button>
+        </div>
+        <div class="composer">
+          <input id="chatInput" type="text" placeholder="Message…" autocomplete="off"/>
+          <button class="send" id="chatSend">↑</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- UPDATE -->
+    <section class="tab" id="tab-update">
+      <div class="title"><div class="h">Share Your Status</div><div class="s">Goes directly to campus responders.</div></div>
+      <div class="field">
+        <label class="f">Building</label>
+        <select id="fBuilding"></select>
+        <div style="display:flex;gap:12px;">
+          <div style="flex:1;"><label class="f">Floor</label><input class="f" id="fFloor" placeholder="e.g. 2"/></div>
+          <div style="flex:1;"><label class="f">Room</label><input class="f" id="fRoom" placeholder="e.g. 204"/></div>
+        </div>
+        <div class="row" style="margin-top:16px;"><div style="font-size:13.5px;font-weight:600;">People with you</div><div class="stepper"><button data-step="people" data-d="-1">–</button><span class="n" id="nPeople">1</span><button data-step="people" data-d="1">+</button></div></div>
+        <div class="row" style="margin-top:14px;"><div style="font-size:13.5px;font-weight:600;">Injured</div><div class="stepper"><button data-step="injured" data-d="-1">–</button><span class="n" id="nInjured">0</span><button data-step="injured" data-d="1">+</button></div></div>
+        <div class="row" style="margin-top:14px;"><div style="font-size:13.5px;font-weight:600;">Critically injured</div><div class="stepper"><button data-step="critical" data-d="-1">–</button><span class="n" id="nCritical">0</span><button data-step="critical" data-d="1">+</button></div></div>
+      </div>
+      <button class="submit" id="statusSubmit">Send Status Update</button>
+      <div id="statusSent"></div>
+    </section>
+  </main>
+
+  <nav>
+    <button class="active" data-tab="home">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none"><path d="M4 11L12 4L20 11V20H14V14H10V20H4V11Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>Home</button>
+    <button data-tab="chat">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none"><path d="M4 5H20V16H9L4 20V5Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>Chat</button>
+    <button data-tab="update">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="8" r="3.4" stroke="currentColor" stroke-width="2"/><path d="M5 20C5 16 8 14 12 14C16 14 19 16 19 20" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Update</button>
+  </nav>
+
+<script>
+(function () {
+  var DEFAULT_BUILDINGS = ["Fowler Hall", "Engineering Quad", "Library", "Student Union"];
+  var form = { people: 1, injured: 0, critical: 0 };
+  var incident = null;
+  var chat = [{ sender: "bot", text: "Hi, I'm the Opius safety assistant. I'm here if you need to report your status or ask for help." }];
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" })[c]; }); }
+  function api(path, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({ "content-type": "application/json" }, opts.headers || {});
+    return fetch(path, opts).then(function (r) { return r.json().catch(function () { return {}; }); });
+  }
+
+  // Tabs
+  Array.prototype.forEach.call(document.querySelectorAll("nav button"), function (b) {
+    b.addEventListener("click", function () {
+      var t = b.getAttribute("data-tab");
+      Array.prototype.forEach.call(document.querySelectorAll("nav button"), function (x) { x.classList.toggle("active", x === b); });
+      Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (s) { s.classList.toggle("active", s.id === "tab-" + t); });
+    });
+  });
+
+  function setStatusPill(active) {
+    var pill = $("statusPill"), dot = pill.querySelector(".dot");
+    var idlePill = $("idlePill"), idleDot = idlePill.querySelector(".dot");
+    if (active) {
+      pill.style.background = "var(--danger-light)"; pill.style.color = "var(--danger)"; dot.style.background = "var(--danger)"; $("statusText").textContent = "Active Alert";
+      idlePill.style.background = "var(--danger-light)"; idlePill.style.color = "var(--danger)"; idleDot.style.background = "var(--danger)"; $("idlePillText").textContent = "Active Alert";
+    } else {
+      pill.style.background = "var(--safe-light)"; pill.style.color = "oklch(40% 0.1 145)"; dot.style.background = "var(--safe)"; $("statusText").textContent = "Listening";
+      idlePill.style.background = "var(--safe-light)"; idlePill.style.color = "oklch(40% 0.1 145)"; idleDot.style.background = "var(--safe)"; $("idlePillText").textContent = "Listening";
+    }
+  }
+
+  function isCritical(text) { return /confirmed|active shooter|shelter|evacuate|injured|avoid/i.test(text || ""); }
+
+  function renderHome() {
+    var active = incident && incident.status && incident.status !== "CLEARED";
+    setStatusPill(!!active);
+    $("homeIdle").style.display = active ? "none" : "flex";
+    $("homeIncident").style.display = active ? "block" : "none";
+    if (!active) return;
+
+    var updates = (incident.liveUpdates || []).map(function (u) { return typeof u === "string" ? u : (u.text || u.message || ""); }).filter(Boolean);
+    var summaryText = updates.filter(isCritical)[0] || incident.recommendedAction || "";
+    $("summary").innerHTML = summaryText
+      ? '<div class="summary"><div class="k">SAFETY SUMMARY</div><div class="v">' + esc(summaryText) + '</div></div>'
+      : "";
+
+    var fa = incident.firstAid;
+    $("firstAid").innerHTML = fa
+      ? '<div class="firstaid"><div class="k">FIRST AID</div><div class="head">' + esc(fa.headline) + '</div><ol>' +
+        (fa.steps || []).map(function (s) { return "<li><strong>" + esc(s.title) + ":</strong> " + esc(s.detail) + "</li>"; }).join("") +
+        '</ol><div class="disc">' + esc(fa.disclaimer || "") + '</div></div>'
+      : "";
+
+    $("updates").innerHTML = updates.length
+      ? updates.map(function (t) {
+          return '<div class="update' + (isCritical(t) ? " critical" : "") + '"><div class="meta"><div class="src">Opius Network</div></div><div class="txt">' + esc(t) + '</div></div>';
+        }).join("")
+      : '<div class="empty">No updates yet. You\\'ll see alerts here if something happens nearby.</div>';
+  }
+
+  function renderChat() {
+    var el = $("chatScroll");
+    el.innerHTML = chat.map(function (m) {
+      return '<div class="msg ' + (m.sender === "user" ? "user" : "bot") + '"><div class="bubble">' + esc(m.text) + "</div></div>";
+    }).join("");
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function botReply(text) { chat.push({ sender: "bot", text: text }); renderChat(); }
+
+  function sendChat(text) {
+    text = (text || "").trim();
+    if (!text) return;
+    chat.push({ sender: "user", text: text });
+    renderChat();
+    if (incident && incident.id) {
+      api("/v1/incidents/" + encodeURIComponent(incident.id) + "/authority-messages", {
+        method: "POST",
+        body: JSON.stringify({ sender: "Community member", role: "user", message: text })
+      }).then(function () {
+        botReply("Thanks — I've logged that and shared it with the response team." + (incident && incident.status !== "CLEARED" ? " Stay safe and keep your phone nearby." : ""));
+      }).catch(function () { botReply("I couldn't reach the response team just now — I'll keep retrying."); });
+    } else {
+      botReply("There's no active incident right now, but I've noted this. Open the Update tab to share your location if you need help.");
+    }
+  }
+
+  $("chatSend").addEventListener("click", function () { var v = $("chatInput").value; $("chatInput").value = ""; sendChat(v); });
+  $("chatInput").addEventListener("keydown", function (e) { if (e.key === "Enter") { var v = $("chatInput").value; $("chatInput").value = ""; sendChat(v); } });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-quick]"), function (b) {
+    b.addEventListener("click", function () { sendChat(b.getAttribute("data-quick")); });
+  });
+
+  // Update form
+  function buildingOptions() {
+    var opts = (incident && incident.zones && incident.zones.length) ? incident.zones : DEFAULT_BUILDINGS;
+    $("fBuilding").innerHTML = opts.map(function (b) { return '<option value="' + esc(b) + '">' + esc(b) + "</option>"; }).join("");
+  }
+  Array.prototype.forEach.call(document.querySelectorAll("[data-step]"), function (b) {
+    b.addEventListener("click", function () {
+      var k = b.getAttribute("data-step"), d = Number(b.getAttribute("data-d"));
+      form[k] = Math.max(k === "people" ? 0 : 0, form[k] + d);
+      $("n" + k.charAt(0).toUpperCase() + k.slice(1)).textContent = form[k];
+    });
+  });
+  $("statusSubmit").addEventListener("click", function () {
+    var building = $("fBuilding").value, floor = $("fFloor").value.trim(), room = $("fRoom").value.trim();
+    var summary = building + (floor ? ", Floor " + floor : "") + (room ? ", Room " + room : "") + " · " + form.people + " with you" +
+      (form.injured > 0 ? " · " + form.injured + " injured" : "") + (form.critical > 0 ? " · " + form.critical + " critical" : "");
+    var safetyStatus = form.injured > 0 || form.critical > 0 ? "INJURED" : "SAFE";
+    var body = {
+      safetyStatus: safetyStatus,
+      injuredCount: form.injured + form.critical,
+      companionsCount: form.people,
+      roomNumber: (floor ? "Floor " + floor + " " : "") + (room ? "Room " + room : ""),
+      note: "Status from " + summary
+    };
+    var now = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    function showSent() {
+      $("statusSent").innerHTML = '<div class="sent"><div class="k">✓ Sent to responders at ' + esc(now) + '</div><div class="v">' + esc(summary) + "</div></div>";
+    }
+    if (incident && incident.id) {
+      api("/v1/incidents/" + encodeURIComponent(incident.id) + "/notes", { method: "POST", body: JSON.stringify(body) })
+        .then(showSent).catch(function () {
+          $("statusSent").innerHTML = '<div class="sent" style="background:var(--danger-light)"><div class="k" style="color:var(--danger)">Couldn\\'t send — will retry</div><div class="v">' + esc(summary) + "</div></div>";
+        });
+    } else {
+      $("statusSent").innerHTML = '<div class="sent"><div class="k">Saved locally</div><div class="v">No active incident yet — ' + esc(summary) + "</div></div>";
+    }
+  });
+
+  function refresh() {
+    return api("/v1/incidents/latest").then(function (res) {
+      incident = res && res.ok ? res.incident : null;
+      renderHome();
+      buildingOptions();
+    }).catch(function () { /* offline; keep last state */ });
+  }
+  $("pullBtn").addEventListener("click", refresh);
+
+  setStatusPill(false);
+  renderChat();
+  buildingOptions();
+  refresh();
+  setInterval(refresh, 5000);
+})();
+</script>
+</body>
+</html>`;
+}
+
 async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const pathname = url.pathname.replace(/\/+$/, "") || "/";
@@ -1927,6 +2269,11 @@ async function route(req, res) {
 
   if (req.method === "GET" && pathname === "/dispatch") {
     text(res, 200, dispatchHtml(url.searchParams.get("incident")), "text/html; charset=utf-8");
+    return;
+  }
+
+  if (req.method === "GET" && (pathname === "/app" || pathname === "/opius")) {
+    text(res, 200, opiusAppHtml(), "text/html; charset=utf-8");
     return;
   }
 
