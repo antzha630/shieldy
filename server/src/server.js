@@ -408,6 +408,66 @@ function medicalBriefFor(incident) {
   return `Reports mention ${injured} injured person(s) and ${companions} companion(s) near users who submitted notes.`;
 }
 
+// Situation-aware first-aid guidance surfaced to users during an active incident.
+// Grounded in "Stop the Bleed" / TECC lay-responder principles: personal safety
+// first, then life-threatening bleeding control. Steps are ordered by priority and
+// scoped to what an untrained bystander can safely do while sheltering.
+function firstAidGuidance(incident) {
+  const injured = (incident.notes || []).reduce(
+    (sum, note) => sum + (Number(note.injuredCount) || 0),
+    0
+  );
+  const active = incident.status !== "CLEARED";
+
+  const steps = [];
+  if (active) {
+    steps.push({
+      priority: "safety",
+      title: "Protect yourself first",
+      detail:
+        "Do not move toward danger to reach an injured person. Only give aid if you are behind a locked or barricaded door, or the area is confirmed clear."
+    });
+  }
+
+  // Massive hemorrhage is the leading preventable cause of death — lead with it.
+  steps.push({
+    priority: "bleeding",
+    title: "Stop life-threatening bleeding",
+    detail:
+      "Press hard directly on the wound with a cloth or clothing and do not let up. For an arm or leg bleed you cannot control, apply a tourniquet 5-8 cm above the wound (not on a joint), tighten until bleeding stops, and note the time."
+  });
+  steps.push({
+    priority: "airway",
+    title: "Keep them breathing",
+    detail:
+      "If unconscious but breathing, roll them onto their side (recovery position). If not breathing and you are trained, begin CPR when it is safe to do so."
+  });
+  steps.push({
+    priority: "shock",
+    title: "Prevent shock",
+    detail:
+      "Keep the person still, lying down, and warm with a jacket or blanket. Reassure them and keep checking that bleeding stays controlled. Do not give food or water."
+  });
+  if (active) {
+    steps.push({
+      priority: "report",
+      title: "Report while sheltering",
+      detail:
+        "Silence your phone, stay low and out of line-of-sight, and send your room/landmark and the number of injured so responders can prioritize."
+    });
+  }
+
+  return {
+    headline:
+      injured > 0
+        ? `${injured} injured reported — control bleeding first.`
+        : "If someone is hurt, control life-threatening bleeding first.",
+    disclaimer:
+      "General guidance only, not a substitute for professional medical care. Call emergency services when safe.",
+    steps
+  };
+}
+
 function addAuthorityMessage(incident, input) {
   const message = {
     id: crypto.randomUUID(),
@@ -1127,6 +1187,19 @@ function usableLiveUpdates(values, incident = null) {
   return updates.length >= 3 ? updates : [];
 }
 
+function authorityMessageLiveUpdates(incident, limit = 3) {
+  return (incident.authorityMessages || [])
+    .filter((message) => String(message.role || "").toLowerCase() === "user")
+    .slice(-limit)
+    .reverse()
+    .map((message) => {
+      const sender = String(message.sender || "User").trim() || "User";
+      const text = String(message.message || "").trim();
+      return text ? `Field report from ${sender}: ${text}` : "";
+    })
+    .filter(Boolean);
+}
+
 const LIVE_UPDATES_RESPONSE_SCHEMA = {
   type: "array",
   items: {
@@ -1233,8 +1306,9 @@ async function generateAgentLiveUpdates(incident) {
 }
 
 async function refreshIncidentLiveUpdates(incident) {
-  const updates = await generateAgentLiveUpdates(incident);
-  incident.liveUpdates = sanitizeLiveUpdates(updates, incident);
+  const generatedUpdates = await generateAgentLiveUpdates(incident);
+  const userMessageUpdates = authorityMessageLiveUpdates(incident, 3);
+  incident.liveUpdates = sanitizeLiveUpdates([...userMessageUpdates, ...generatedUpdates], incident);
   incident.updatedAt = nowIso();
 }
 
@@ -1367,6 +1441,7 @@ function publicIncident(incident) {
     ...incident,
     observationCount: incident.observations.length,
     authorityMessageCount: incident.authorityMessages.length,
+    firstAid: firstAidGuidance(incident),
     liveUpdates: effectiveLiveUpdates,
     observations: incident.observations.slice(-25),
     notes: incident.notes.slice(-25),
@@ -1572,6 +1647,7 @@ async function handleAuthorityMessage(req, res, incidentId) {
     ok: true,
     incidentId: incident.id,
     message,
+    liveUpdates: incident.liveUpdates,
     authorityMessages: incident.authorityMessages.slice(-50)
   });
 }
@@ -1655,6 +1731,20 @@ function dispatchHtml(selectedIncidentId = null) {
     </div>
   `).join("") || "";
 
+  const firstAid = selected ? firstAidGuidance(selected) : null;
+  const firstAidRows = firstAid
+    ? `<p class="brief"><strong>First aid:</strong> ${escapeHtml(firstAid.headline)}</p>
+       <ol class="firstaid">
+         ${firstAid.steps
+           .map(
+             (step) =>
+               `<li><strong>${escapeHtml(step.title)}:</strong> ${escapeHtml(step.detail)}</li>`
+           )
+           .join("")}
+       </ol>
+       <p class="disclaimer">${escapeHtml(firstAid.disclaimer)}</p>`
+    : "";
+
   const liveUpdateRows = (selected?.liveUpdates || [])
     .slice()
     .reverse()
@@ -1711,6 +1801,7 @@ function dispatchHtml(selectedIncidentId = null) {
           <p class="brief"><strong>Police brief:</strong> ${escapeHtml(selected.policeBrief)}</p>
           <p class="brief"><strong>Medical:</strong> ${escapeHtml(selected.medicalBrief)}</p>
           <p class="brief"><strong>Action:</strong> ${escapeHtml(selected.recommendedAction)}</p>
+          ${firstAidRows}
           <p>
             <button type="button" id="clearNotificationsBtn">Clear Notifications for Incident</button>
           </p>

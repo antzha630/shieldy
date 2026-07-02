@@ -68,6 +68,20 @@ class AudioSensorService : Service() {
         // If peak/RMS ratio is high, the sound is likely impulsive (like a gunshot)
         private const val IMPULSIVE_PEAK_RMS_RATIO = 3.0f
 
+        // CLIPPING: Cheap phone mics saturate on nearby gunshots (samples pin to
+        // ±32767). A sample is "clipped" when its magnitude is within CLIP_MARGIN of
+        // full scale. Two thresholds:
+        //  - CLIP_FRACTION_GATE: enough saturation to treat the frame as an impulsive
+        //    transient and open the activity gate (a strong gunshot cue).
+        //  - CLIP_FRACTION_SEVERE: so much saturation the waveform is destroyed and
+        //    YAMNet confidence is unreliable; we relax the ML threshold so a real,
+        //    close shot that clips the mic is not missed.
+        private const val CLIP_MARGIN = 64                 // within ~0.2% of full scale
+        private const val CLIP_FRACTION_GATE = 0.005f      // 0.5% of samples clipped
+        private const val CLIP_FRACTION_SEVERE = 0.02f     // 2% of samples clipped
+        // ML threshold applied when audio is severely clipped (lower = more sensitive).
+        private const val CLIPPED_CONFIDENCE_THRESHOLD = 0.06f
+
         // TIER 2: ML confirmation
         // Gunshot confidence threshold. YAMNet typically outputs 0.0-1.0 for each class.
         // 0.10 is more sensitive - lowered from 0.15 since we need more positives.
@@ -251,6 +265,9 @@ class AudioSensorService : Service() {
         wakeCaptureSamplesNeeded = MODEL_INPUT_SAMPLES
         
         Log.i(TAG, "Starting wake audio capture for session=$sessionId")
+        // Ensure we have a position fix so this node's vote can contribute to
+        // triangulation, even though non-sentinels normally keep location idle.
+        locationProvider?.startLocationUpdates()
         startAudioRecording()
     }
 
@@ -259,9 +276,14 @@ class AudioSensorService : Service() {
             try {
                 isProcessingWakeRequest = true
                 
+                val voterLocation = locationProvider?.currentLocation?.value
+                val voterLat = voterLocation?.latitude ?: Double.NaN
+                val voterLon = voterLocation?.longitude ?: Double.NaN
+                val voterAlt = voterLocation?.altitude ?: Double.NaN
+
                 if (!zeticReady && !legacyTfReady) {
                     Log.w(TAG, "No classifier ready for wake vote, voting NO for $sessionId")
-                    meshNetworkManager.submitClassifyVote(sessionId, false, 0f)
+                    meshNetworkManager.submitClassifyVote(sessionId, false, 0f, voterLat, voterLon, voterAlt)
                     return@launch
                 }
                 
@@ -283,11 +305,11 @@ class AudioSensorService : Service() {
                         "Wake classify result: gunshot=$isGunshot weighted=${result.weightedConfidence} " +
                             "tf=${result.legacyTfConfidence} zetic=${result.zeticConfidence} top=${result.topLabel}"
                     )
-                    meshNetworkManager.submitClassifyVote(sessionId, isGunshot, result.weightedConfidence)
+                    meshNetworkManager.submitClassifyVote(sessionId, isGunshot, result.weightedConfidence, voterLat, voterLon, voterAlt)
                     SystemEventFlow.updateModelInference(result.weightedConfidence, result.topLabel)
                 } else {
                     Log.w(TAG, "Classifier returned null for $sessionId")
-                    meshNetworkManager.submitClassifyVote(sessionId, false, 0f)
+                    meshNetworkManager.submitClassifyVote(sessionId, false, 0f, voterLat, voterLon, voterAlt)
                 }
             } finally {
                 isProcessingWakeRequest = false
@@ -361,7 +383,7 @@ class AudioSensorService : Service() {
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.notification_title))
             .setContentText(getString(R.string.notification_text))
-            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -497,6 +519,9 @@ class AudioSensorService : Service() {
                 val instantRms = calculateRMS(buffer, readResult)
                 val peakAmplitude = calculateMaxAmplitude(buffer, readResult)
                 val peakNormalized = peakAmplitude / 32768f
+                val clipFraction = calculateClipFraction(buffer, readResult)
+                val clippingGate = clipFraction >= CLIP_FRACTION_GATE
+                val clippingSevere = clipFraction >= CLIP_FRACTION_SEVERE
                 
                 // TIER 1: Apply EMA smoothing for stable gate decisions
                 smoothedAmplitude = EMA_ALPHA * instantRms + (1 - EMA_ALPHA) * smoothedAmplitude
@@ -534,6 +559,7 @@ class AudioSensorService : Service() {
                     SystemEventFlow.updateAmplitude(instantRms)
                     SystemEventFlow.updateSmoothedAmplitude(smoothedAmplitude)
                     SystemEventFlow.updateCooldownRemaining(cooldownRemaining)
+                    SystemEventFlow.updateClipping(clippingGate, clipFraction)
                     lastAmplitudeUpdate = currentTime
                 }
 
@@ -545,9 +571,10 @@ class AudioSensorService : Service() {
                 val rmsGateOpen = instantRms >= gateThreshold
                 val peakGateOpen = peakNormalized >= PEAK_THRESHOLD_NORMALIZED
                 val impulsiveSound = instantRms > 50 && (peakAmplitude / instantRms) > IMPULSIVE_PEAK_RMS_RATIO
-                
-                // Open gate if ANY of the criteria are met (more sensitive)
-                val gateOpen = (rmsGateOpen || peakGateOpen || impulsiveSound) && rollingBufferFilled
+
+                // Open gate if ANY of the criteria are met (more sensitive).
+                // Mic clipping is itself a strong impulsive cue for a nearby gunshot.
+                val gateOpen = (rmsGateOpen || peakGateOpen || impulsiveSound || clippingGate) && rollingBufferFilled
                 
                 // Update gate state telemetry if changed
                 if (gateOpen != currentGateOpen) {
@@ -558,9 +585,10 @@ class AudioSensorService : Service() {
                             rmsGateOpen -> "RMS"
                             peakGateOpen -> "PEAK"
                             impulsiveSound -> "IMPULSIVE"
+                            clippingGate -> "CLIP"
                             else -> "?"
                         }
-                        Log.d(TAG, "Activity gate OPENED [$reason] rms=${String.format("%.1f", instantRms)} peak=${"%.3f".format(peakNormalized)} thresh=$gateThreshold")
+                        Log.d(TAG, "Activity gate OPENED [$reason] rms=${String.format("%.1f", instantRms)} peak=${"%.3f".format(peakNormalized)} clip=${"%.3f".format(clipFraction)} thresh=$gateThreshold")
                     } else {
                         Log.d(TAG, "Activity gate CLOSED")
                         consecutiveHighConfidence = 0
@@ -577,11 +605,16 @@ class AudioSensorService : Service() {
                     val result = classifyWeighted(modelInput)
                     
                     if (result != null) {
-                        // Log every inference for debugging detection issues
-                        val isAboveThreshold = result.weightedConfidence >= GUNSHOT_CONFIDENCE_THRESHOLD
+                        // Log every inference for debugging detection issues.
+                        // When the mic is severely clipped the ML input waveform is
+                        // distorted, so relax the threshold to avoid missing a real
+                        // close-range shot that saturated the microphone.
+                        val effectiveThreshold =
+                            if (clippingSevere) CLIPPED_CONFIDENCE_THRESHOLD else GUNSHOT_CONFIDENCE_THRESHOLD
+                        val isAboveThreshold = result.weightedConfidence >= effectiveThreshold
                         Log.d(TAG, "ML: weighted=${"%.3f".format(result.weightedConfidence)} " +
                             "tf=${"%.3f".format(result.legacyTfConfidence)} zetic=${"%.3f".format(result.zeticConfidence)} " +
-                            "(thresh=$GUNSHOT_CONFIDENCE_THRESHOLD, above=$isAboveThreshold) " +
+                            "(thresh=$effectiveThreshold clip=${"%.3f".format(clipFraction)}, above=$isAboveThreshold) " +
                             "top=${result.topLabel}@${"%.3f".format(result.topScore)}")
                         
                         SystemEventFlow.updateModelInference(
@@ -649,6 +682,24 @@ class AudioSensorService : Service() {
             sum += buffer[i].toDouble() * buffer[i].toDouble()
         }
         return sqrt(sum / readSize)
+    }
+
+    /**
+     * Fraction of samples in this frame that are saturated (pinned within CLIP_MARGIN
+     * of the 16-bit full-scale rails). A high value means the microphone clipped.
+     */
+    private fun calculateClipFraction(buffer: ShortArray, readSize: Int): Float {
+        if (readSize <= 0) return 0f
+        val clipHigh = Short.MAX_VALUE - CLIP_MARGIN
+        val clipLow = Short.MIN_VALUE + CLIP_MARGIN
+        var clipped = 0
+        for (i in 0 until readSize) {
+            val sample = buffer[i].toInt()
+            if (sample >= clipHigh || sample <= clipLow) {
+                clipped++
+            }
+        }
+        return clipped.toFloat() / readSize.toFloat()
     }
 
     private fun calculateMaxAmplitude(buffer: ShortArray, readSize: Int): Int {
@@ -766,6 +817,7 @@ class AudioSensorService : Service() {
         SystemEventFlow.updateGateOpen(false)
         SystemEventFlow.updateCooldownRemaining(0L)
         SystemEventFlow.updateModelInference(0f, "idle")
+        SystemEventFlow.updateClipping(false, 0f)
         Log.d(TAG, "Audio recording stopped")
     }
 }

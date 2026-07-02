@@ -6,4 +6,10 @@
     <color name="safe_green">#FF00FF00</color>
     <color name="sensor_active">#FF00E676</color>
     <color name="background_dark">#FF0A0A0A</color>
+
+    <!-- Brand / logo palette -->
+    <color name="brand_primary">#FF00E676</color>
+    <color name="brand_primary_dim">#FF0F9D58</color>
+    <color name="brand_ink">#FF0A0A0A</color>
+    <color name="ic_launcher_background">#FF0A0A0A</color>
 </resources>

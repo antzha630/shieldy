@@ -31,7 +31,13 @@ data class LocationInfo(
     val coordinateText: String,
     val timestamp: String,
     val latitude: Double,
-    val longitude: Double
+    val longitude: Double,
+    // Altitude in metres (WGS84). Used to estimate the reporting floor inside a
+    // multi-storey building. Double.NaN when the fix carries no vertical component.
+    val altitude: Double = Double.NaN,
+    // Horizontal accuracy of the fix in metres (Float.NaN when unknown). Drives how
+    // much a report is trusted when triangulating the source location.
+    val horizontalAccuracyMeters: Float = Float.NaN
 )
 
 class LocationProvider(private val context: Context) {
@@ -106,6 +112,8 @@ class LocationProvider(private val context: Context) {
     private fun updateLocation(location: Location) {
         val coordinateText = "${String.format("%.4f", location.latitude)}, ${String.format("%.4f", location.longitude)}"
         val timestamp = formatTimestamp(System.currentTimeMillis())
+        val altitude = if (location.hasAltitude()) location.altitude else Double.NaN
+        val accuracy = if (location.hasAccuracy()) location.accuracy else Float.NaN
 
         _currentLocation.value = LocationInfo(
             label = coordinateText,
@@ -113,7 +121,9 @@ class LocationProvider(private val context: Context) {
             coordinateText = coordinateText,
             timestamp = timestamp,
             latitude = location.latitude,
-            longitude = location.longitude
+            longitude = location.longitude,
+            altitude = altitude,
+            horizontalAccuracyMeters = accuracy
         )
         reverseGeocode(location, coordinateText, timestamp)
     }
@@ -164,7 +174,7 @@ class LocationProvider(private val context: Context) {
             ).joinToString(" • ").ifBlank { "Near your current location" }
         } ?: "Near your current location"
 
-        _currentLocation.value = LocationInfo(
+        _currentLocation.value = _currentLocation.value.copy(
             label = label,
             relativeLocation = relative,
             coordinateText = coordinateText,

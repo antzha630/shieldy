@@ -55,7 +55,19 @@ class MeshNetworkManager(context: Context) {
         private const val DUTY_REFRESH_MS = 15_000L
         private const val VOTE_WINDOW_MS = 5_000L
         private const val MESH_RETRY_INTERVAL_MS = 5_000L
-        private const val DEFAULT_CONFIRMATION_THRESHOLD = 1
+
+        // Confirmation / anti-herding tuning.
+        // 0 == AUTO: the required number of independent confirmations is derived from
+        // the number of connected peers (see requiredConfirmations). A fixed positive
+        // value (set via setConfirmationThreshold) overrides AUTO for testing.
+        private const val DEFAULT_CONFIRMATION_THRESHOLD = 0
+        // Fraction of the fleet (self + peers) that must independently confirm.
+        private const val QUORUM_FRACTION = 0.34
+        // Upper bound so very large fleets don't need everyone to agree.
+        private const val MAX_REQUIRED_CONFIRMATIONS = 5
+        // Nominal storey height (metres) used to convert an altitude delta into a
+        // relative floor offset for within-building localization.
+        private const val FLOOR_HEIGHT_METERS = 3.5
         private const val PREFS_NAME = "echoshield_mesh"
         private const val PREF_LOCAL_NODE_ID = "local_node_id"
 
@@ -69,6 +81,17 @@ class MeshNetworkManager(context: Context) {
         const val PAYLOAD_SENTINEL_HANDOFF = "SENTINEL:HANDOFF"
         const val PAYLOAD_SENTINEL_DISARM = "SENTINEL:DISARM"
         const val PAYLOAD_RESPONSE_TRIGGER = "RESPONSE:TRIGGER"
+
+        /** Great-circle distance in metres between two WGS84 coordinates. */
+        fun haversineMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+            val earthRadius = 6_371_000.0
+            val dLat = Math.toRadians(lat2 - lat1)
+            val dLon = Math.toRadians(lon2 - lon1)
+            val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2)
+            return earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+        }
 
         @Volatile
         private var instance: MeshNetworkManager? = null
@@ -950,13 +973,84 @@ class MeshNetworkManager(context: Context) {
     ) {
         fun confirmedCount(): Int = votes.values.count { it.isGunshot }
         fun totalVotes(): Int = votes.size
+
+        /** Gunshot confirmations from nodes other than the one that raised the alarm. */
+        fun independentConfirmations(): Int =
+            votes.values.count { it.isGunshot && it.nodeId != sourceNodeId }
+
+        /**
+         * Estimate the source location from every confirming node that reported a
+         * usable fix, weighted by classifier confidence. With coarse GPS and
+         * unsynchronised clocks a confidence-weighted centroid of the detecting
+         * cluster is the honest achievable estimate; the per-vote coordinates and
+         * timestamps now carried make a true TDoA solve a later upgrade. Returns null
+         * when no confirming node reported coordinates.
+         */
+        fun estimateSource(): SourceEstimate? {
+            val located = votes.values.filter {
+                it.isGunshot && it.latitude.isFinite() && it.longitude.isFinite() &&
+                    !(it.latitude == 0.0 && it.longitude == 0.0)
+            }
+            if (located.isEmpty()) return null
+
+            var weightSum = 0.0
+            var latAcc = 0.0
+            var lonAcc = 0.0
+            val altitudes = mutableListOf<Double>()
+            located.forEach { vote ->
+                val w = vote.confidence.toDouble().coerceIn(0.05, 1.0)
+                weightSum += w
+                latAcc += vote.latitude * w
+                lonAcc += vote.longitude * w
+                if (vote.altitude.isFinite()) altitudes.add(vote.altitude)
+            }
+            if (weightSum <= 0.0) return null
+
+            val estLat = latAcc / weightSum
+            val estLon = lonAcc / weightSum
+            val estAlt = if (altitudes.isNotEmpty()) altitudes.average() else Double.NaN
+
+            // Relative floor offset from the lowest confirming node.
+            val floor = if (altitudes.size >= 2) {
+                val spread = (altitudes.maxOrNull() ?: 0.0) - (altitudes.minOrNull() ?: 0.0)
+                (spread / FLOOR_HEIGHT_METERS).toInt()
+            } else 0
+
+            // Geographic spread of contributors as a crude confidence radius (metres).
+            val spreadMeters = located.maxOfOrNull { vote ->
+                haversineMeters(estLat, estLon, vote.latitude, vote.longitude)
+            } ?: 0.0
+
+            return SourceEstimate(
+                latitude = estLat,
+                longitude = estLon,
+                altitude = estAlt,
+                floorOffset = floor,
+                method = if (located.size >= 2) "weighted_centroid" else "single_report",
+                contributingNodes = located.size,
+                spreadMeters = spreadMeters
+            )
+        }
     }
 
     data class ClassifyVote(
         val nodeId: String,
         val isGunshot: Boolean,
         val confidence: Float,
-        val timestamp: Long
+        val timestamp: Long,
+        val latitude: Double = Double.NaN,
+        val longitude: Double = Double.NaN,
+        val altitude: Double = Double.NaN
+    )
+
+    data class SourceEstimate(
+        val latitude: Double,
+        val longitude: Double,
+        val altitude: Double,
+        val floorOffset: Int,
+        val method: String,
+        val contributingNodes: Int,
+        val spreadMeters: Double
     )
 
     data class ResponseTrigger(
@@ -964,15 +1058,45 @@ class MeshNetworkManager(context: Context) {
         val confirmedByNodes: List<String>,
         val latitude: Double,
         val longitude: Double,
-        val timestamp: Long
+        val timestamp: Long,
+        // Triangulated source estimate (falls back to the raising node's fix).
+        val estimatedLatitude: Double = latitude,
+        val estimatedLongitude: Double = longitude,
+        val estimatedAltitude: Double = Double.NaN,
+        val floorOffset: Int = 0,
+        val localizationMethod: String = "single_report",
+        val spreadMeters: Double = 0.0
     )
 
     fun setConfirmationThreshold(threshold: Int) {
-        confirmationThreshold = threshold.coerceAtLeast(1)
-        Log.i(TAG, "Confirmation threshold set to $confirmationThreshold")
+        // A positive value pins the threshold (manual/testing). Zero or negative
+        // restores AUTO mode, where the quorum scales with the connected fleet.
+        confirmationThreshold = threshold.coerceAtLeast(0)
+        Log.i(TAG, "Confirmation threshold set to ${if (confirmationThreshold == 0) "AUTO" else confirmationThreshold.toString()}")
     }
 
-    fun getConfirmationThreshold(): Int = confirmationThreshold
+    fun getConfirmationThreshold(): Int = effectiveConfirmationThreshold()
+
+    /**
+     * How many independent gunshot confirmations are needed to trigger a response.
+     *
+     * A single false positive on one phone must never cascade into a fleet-wide alert
+     * (the "herding" failure). So once any peers are present we require corroboration
+     * from at least two distinct nodes, scaling up with fleet size but capped so a
+     * large building doesn't need unanimity. A solo device (no peers) falls back to a
+     * local-only trigger of 1 since it has nothing to corroborate against.
+     */
+    private fun requiredConfirmations(): Int {
+        val peers = connectedEndpoints.size
+        if (peers == 0) return 1
+        val scaled = Math.ceil((peers + 1) * QUORUM_FRACTION).toInt()
+        return scaled.coerceIn(2, MAX_REQUIRED_CONFIRMATIONS)
+    }
+
+    private fun effectiveConfirmationThreshold(): Int {
+        val override = confirmationThreshold
+        return if (override >= 1) override else requiredConfirmations()
+    }
 
     fun broadcastWakeClassify(latitude: Double, longitude: Double) {
         val sessionId = createMessageId()
@@ -1001,7 +1125,9 @@ class MeshNetworkManager(context: Context) {
             nodeId = localEndpointName,
             isGunshot = true,
             confidence = 1.0f,
-            timestamp = System.currentTimeMillis()
+            timestamp = System.currentTimeMillis(),
+            latitude = latitude,
+            longitude = longitude
         )
         pendingVoteSessions[sessionId] = session
 
@@ -1012,7 +1138,14 @@ class MeshNetworkManager(context: Context) {
         checkVoteThreshold(sessionId)
     }
 
-    fun submitClassifyVote(sessionId: String, isGunshot: Boolean, confidence: Float) {
+    fun submitClassifyVote(
+        sessionId: String,
+        isGunshot: Boolean,
+        confidence: Float,
+        latitude: Double = Double.NaN,
+        longitude: Double = Double.NaN,
+        altitude: Double = Double.NaN
+    ) {
         val payload = buildString {
             append(PAYLOAD_CLASSIFY_VOTE)
             append("|")
@@ -1025,18 +1158,27 @@ class MeshNetworkManager(context: Context) {
             append(confidence)
             append("|")
             append(System.currentTimeMillis())
+            append("|")
+            append(latitude)
+            append("|")
+            append(longitude)
+            append("|")
+            append(altitude)
         }
 
         markMessageSeen("vote:$sessionId:$localEndpointName")
         sendPayloadToAllEndpoints(payload)
-        Log.d(TAG, "Submitted vote for session=$sessionId gunshot=$isGunshot conf=$confidence")
+        Log.d(TAG, "Submitted vote for session=$sessionId gunshot=$isGunshot conf=$confidence loc=($latitude,$longitude)")
 
         pendingVoteSessions[sessionId]?.let { session ->
             session.votes[localEndpointName] = ClassifyVote(
                 nodeId = localEndpointName,
                 isGunshot = isGunshot,
                 confidence = confidence,
-                timestamp = System.currentTimeMillis()
+                timestamp = System.currentTimeMillis(),
+                latitude = latitude,
+                longitude = longitude,
+                altitude = altitude
             )
             checkVoteThreshold(sessionId)
         }
@@ -1112,6 +1254,10 @@ class MeshNetworkManager(context: Context) {
         val isGunshot = parts[3] == "1"
         val confidence = parts[4].toFloatOrNull() ?: 0f
         val timestamp = parts[5].toLongOrNull() ?: System.currentTimeMillis()
+        // Coordinates are optional (older peers omit them).
+        val voterLat = parts.getOrNull(6)?.toDoubleOrNull() ?: Double.NaN
+        val voterLon = parts.getOrNull(7)?.toDoubleOrNull() ?: Double.NaN
+        val voterAlt = parts.getOrNull(8)?.toDoubleOrNull() ?: Double.NaN
 
         val dedupeKey = "vote:$sessionId:$voterNodeId"
         if (!markMessageSeen(dedupeKey)) {
@@ -1125,7 +1271,10 @@ class MeshNetworkManager(context: Context) {
             nodeId = voterNodeId,
             isGunshot = isGunshot,
             confidence = confidence,
-            timestamp = timestamp
+            timestamp = timestamp,
+            latitude = voterLat,
+            longitude = voterLon,
+            altitude = voterAlt
         )
 
         val session = pendingVoteSessions[sessionId]
@@ -1184,19 +1333,35 @@ class MeshNetworkManager(context: Context) {
         val session = pendingVoteSessions[sessionId] ?: return
 
         val confirmedCount = session.confirmedCount()
-        Log.d(TAG, "Vote check: session=$sessionId confirmed=$confirmedCount threshold=$confirmationThreshold")
+        val threshold = effectiveConfirmationThreshold()
+        val hasPeers = connectedEndpoints.isNotEmpty()
+        // Anti-herding: once other nodes exist, the raising node's own vote is never
+        // sufficient — at least one independent node must also confirm on its own audio.
+        val independentOk = !hasPeers || session.independentConfirmations() >= 1
+        Log.d(
+            TAG,
+            "Vote check: session=$sessionId confirmed=$confirmedCount " +
+                "independent=${session.independentConfirmations()} threshold=$threshold peers=${connectedEndpoints.size}"
+        )
 
-        if (confirmedCount >= confirmationThreshold) {
+        if (confirmedCount >= threshold && independentOk) {
             val confirmedNodes = session.votes.entries
                 .filter { it.value.isGunshot }
                 .map { it.key }
 
+            val estimate = session.estimateSource()
             val trigger = ResponseTrigger(
                 sessionId = sessionId,
                 confirmedByNodes = confirmedNodes,
                 latitude = session.latitude,
                 longitude = session.longitude,
-                timestamp = System.currentTimeMillis()
+                timestamp = System.currentTimeMillis(),
+                estimatedLatitude = estimate?.latitude ?: session.latitude,
+                estimatedLongitude = estimate?.longitude ?: session.longitude,
+                estimatedAltitude = estimate?.altitude ?: Double.NaN,
+                floorOffset = estimate?.floorOffset ?: 0,
+                localizationMethod = estimate?.method ?: "single_report",
+                spreadMeters = estimate?.spreadMeters ?: 0.0
             )
 
             scope.launch {
@@ -1204,11 +1369,16 @@ class MeshNetworkManager(context: Context) {
             }
 
             markMessageSeen("response:$sessionId")
-            broadcastResponseTrigger(session)
+            broadcastResponseTrigger(trigger)
             publishResponseTriggerToCloud(trigger, sourceEndpointId = null)
             pendingVoteSessions.remove(sessionId)
             clearOrphanVotes(sessionId)
-            Log.w(TAG, "RESPONSE TRIGGERED! session=$sessionId confirmedBy=$confirmedNodes")
+            Log.w(
+                TAG,
+                "RESPONSE TRIGGERED! session=$sessionId confirmedBy=$confirmedNodes " +
+                    "est=(${trigger.estimatedLatitude},${trigger.estimatedLongitude}) " +
+                    "method=${trigger.localizationMethod} spread=${"%.1f".format(trigger.spreadMeters)}m floor=${trigger.floorOffset}"
+            )
         }
     }
 
@@ -1225,21 +1395,23 @@ class MeshNetworkManager(context: Context) {
             append(trigger.confirmedByNodes.joinToString(","))
             append("|")
             append(trigger.timestamp)
+            append("|")
+            append(trigger.estimatedLatitude)
+            append("|")
+            append(trigger.estimatedLongitude)
+            append("|")
+            append(trigger.estimatedAltitude)
+            append("|")
+            append(trigger.floorOffset)
+            append("|")
+            append(trigger.localizationMethod)
+            append("|")
+            append(trigger.spreadMeters)
         }
     }
 
-    private fun broadcastResponseTrigger(session: VoteSession) {
-        val trigger = ResponseTrigger(
-            sessionId = session.sessionId,
-            confirmedByNodes = session.votes.entries
-                .filter { it.value.isGunshot }
-                .map { it.key },
-            latitude = session.latitude,
-            longitude = session.longitude,
-            timestamp = System.currentTimeMillis()
-        )
+    private fun broadcastResponseTrigger(trigger: ResponseTrigger) {
         val payload = responseTriggerPayload(trigger)
-
         rememberLatestAlertState(payload)
         sendPayloadToAllEndpoints(payload)
     }
@@ -1253,6 +1425,13 @@ class MeshNetworkManager(context: Context) {
         val longitude = parts[3].toDoubleOrNull() ?: return
         val confirmedNodes = parts[4].split(",").filter { it.isNotBlank() }
         val timestamp = parts[5].toLongOrNull() ?: System.currentTimeMillis()
+        // Triangulated estimate fields are optional (older peers omit them).
+        val estLat = parts.getOrNull(6)?.toDoubleOrNull() ?: latitude
+        val estLon = parts.getOrNull(7)?.toDoubleOrNull() ?: longitude
+        val estAlt = parts.getOrNull(8)?.toDoubleOrNull() ?: Double.NaN
+        val floorOffset = parts.getOrNull(9)?.toIntOrNull() ?: 0
+        val method = parts.getOrNull(10)?.takeIf { it.isNotBlank() } ?: "single_report"
+        val spreadMeters = parts.getOrNull(11)?.toDoubleOrNull() ?: 0.0
 
         val dedupeKey = "response:$sessionId"
         if (!markMessageSeen(dedupeKey)) return
@@ -1264,7 +1443,13 @@ class MeshNetworkManager(context: Context) {
             confirmedByNodes = confirmedNodes,
             latitude = latitude,
             longitude = longitude,
-            timestamp = timestamp
+            timestamp = timestamp,
+            estimatedLatitude = estLat,
+            estimatedLongitude = estLon,
+            estimatedAltitude = estAlt,
+            floorOffset = floorOffset,
+            localizationMethod = method,
+            spreadMeters = spreadMeters
         )
 
         scope.launch {
@@ -1306,8 +1491,8 @@ class MeshNetworkManager(context: Context) {
             leaderNodeId = assignment.leaderNodeId,
             dutyEpoch = assignment.epoch,
             sessionId = trigger.sessionId,
-            latitude = trigger.latitude,
-            longitude = trigger.longitude,
+            latitude = trigger.estimatedLatitude,
+            longitude = trigger.estimatedLongitude,
             confirmedByNodes = trigger.confirmedByNodes
         )
 
