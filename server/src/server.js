@@ -2099,6 +2099,7 @@ function opiusAppHtml() {
 
 <script>
 (function () {
+  var APP_API_KEY = ${JSON.stringify(API_KEY)};
   var DEFAULT_BUILDINGS = ["Fowler Hall", "Engineering Quad", "Library", "Student Union"];
   var form = { people: 1, injured: 0, critical: 0 };
   var incident = null;
@@ -2108,8 +2109,20 @@ function opiusAppHtml() {
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" })[c]; }); }
   function api(path, opts) {
     opts = opts || {};
-    opts.headers = Object.assign({ "content-type": "application/json" }, opts.headers || {});
-    return fetch(path, opts).then(function (r) { return r.json().catch(function () { return {}; }); });
+    var headers = Object.assign({ "content-type": "application/json" }, opts.headers || {});
+    if (APP_API_KEY) headers.authorization = "Bearer " + APP_API_KEY;
+    opts.headers = headers;
+    return fetch(path, opts).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        if (!r.ok) {
+          var error = new Error((data && data.error) || ("HTTP " + r.status));
+          error.status = r.status;
+          error.body = data;
+          throw error;
+        }
+        return data;
+      });
+    });
   }
 
   // Tabs
