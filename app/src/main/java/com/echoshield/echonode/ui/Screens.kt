@@ -1,5 +1,7 @@
 package com.echoshield.echonode.ui
 
+import com.echoshield.echonode.R
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -9,6 +11,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -57,6 +60,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -1514,7 +1518,11 @@ fun PermissionRequestScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Text(text = "🛡️", fontSize = 80.sp)
+        Image(
+            painter = painterResource(id = R.drawable.ic_echoshield_logo),
+            contentDescription = "EchoShield logo",
+            modifier = Modifier.size(96.dp)
+        )
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -1599,6 +1607,15 @@ private fun FlowHeader(
                         modifier = Modifier
                             .clickable { onBack() }
                             .padding(end = 12.dp)
+                    )
+                }
+                if (!showBackArrow) {
+                    Image(
+                        painter = painterResource(id = R.drawable.ic_echoshield_logo),
+                        contentDescription = "EchoShield logo",
+                        modifier = Modifier
+                            .size(32.dp)
+                            .padding(end = 8.dp)
                     )
                 }
                 Text(

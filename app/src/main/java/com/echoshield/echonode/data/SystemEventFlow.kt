@@ -46,6 +46,14 @@ object SystemEventFlow {
     private val _modelTopLabel = MutableStateFlow("unknown")
     val modelTopLabel: StateFlow<String> = _modelTopLabel.asStateFlow()
 
+    // Microphone clipping (saturation) telemetry. When too many samples pin to the
+    // 16-bit rails the captured waveform is distorted and ML confidence degrades.
+    private val _clippingDetected = MutableStateFlow(false)
+    val clippingDetected: StateFlow<Boolean> = _clippingDetected.asStateFlow()
+
+    private val _clipFraction = MutableStateFlow(0f)
+    val clipFraction: StateFlow<Float> = _clipFraction.asStateFlow()
+
     suspend fun emit(eventType: String, payload: String? = null) {
         _events.emit(SystemEvent(eventType, payload, System.currentTimeMillis()))
     }
@@ -93,6 +101,11 @@ object SystemEventFlow {
 
     fun updateCooldownRemaining(remainingMs: Long) {
         _cooldownRemainingMs.value = remainingMs
+    }
+
+    fun updateClipping(detected: Boolean, fraction: Float) {
+        _clippingDetected.value = detected
+        _clipFraction.value = fraction
     }
 
     data class SystemEvent(
