@@ -1,6 +1,7 @@
 package com.echoshield.echonode.comms
 
 import android.content.Context
+import com.echoshield.echonode.core.contracts.ConsensusSnapshot
 import com.echoshield.echonode.core.contracts.IncidentReportEvent
 import com.echoshield.echonode.core.contracts.MeshGateway
 import com.echoshield.echonode.core.contracts.MeshStatus
@@ -37,6 +38,8 @@ class MeshGatewayImpl(context: Context) : MeshGateway {
     private val _sentinelDutyActive = MutableStateFlow(meshManager.sentinelDutyActive.value)
     override val sentinelDutyActive: StateFlow<Boolean> = _sentinelDutyActive.asStateFlow()
 
+    override val consensusState: StateFlow<ConsensusSnapshot> = meshManager.consensusState
+
     init {
         scope.launch {
             meshManager.meshStatus.collect { status ->
@@ -72,7 +75,8 @@ class MeshGatewayImpl(context: Context) : MeshGateway {
                         confirmedByNodes = trigger.confirmedByNodes,
                         latitude = trigger.latitude,
                         longitude = trigger.longitude,
-                        timestamp = trigger.timestamp
+                        timestamp = trigger.timestamp,
+                        estimate = trigger.estimate
                     )
                 )
             }
@@ -98,8 +102,23 @@ class MeshGatewayImpl(context: Context) : MeshGateway {
     override fun broadcastWakeClassify(latitude: Double, longitude: Double) =
         meshManager.broadcastWakeClassify(latitude, longitude)
 
-    override fun submitClassifyVote(sessionId: String, isGunshot: Boolean, confidence: Float) =
-        meshManager.submitClassifyVote(sessionId, isGunshot, confidence)
+    override fun submitClassifyVote(
+        sessionId: String,
+        isGunshot: Boolean,
+        confidence: Float,
+        latitude: Double,
+        longitude: Double,
+        altitude: Double,
+        detectedAtMs: Long
+    ) = meshManager.submitClassifyVote(
+        sessionId = sessionId,
+        isGunshot = isGunshot,
+        confidence = confidence,
+        latitude = latitude,
+        longitude = longitude,
+        altitude = altitude,
+        detectedAtMs = detectedAtMs
+    )
 
     override fun publishConfirmedResponse(trigger: ResponseTriggerEvent) =
         meshManager.publishConfirmedResponseTrigger(
@@ -107,7 +126,8 @@ class MeshGatewayImpl(context: Context) : MeshGateway {
             confirmedByNodes = trigger.confirmedByNodes,
             latitude = trigger.latitude,
             longitude = trigger.longitude,
-            timestamp = trigger.timestamp
+            timestamp = trigger.timestamp,
+            estimate = trigger.estimate
         )
 
     override fun submitIncidentReport(report: IncidentReportEvent) =

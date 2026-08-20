@@ -82,6 +82,16 @@ class SensorGatewayImpl : SensorGateway {
                 _telemetry.value = _telemetry.value.copy(serviceRunning = running)
             }
         }
+        scope.launch {
+            SystemEventFlow.clippingDetected.collect { clipping ->
+                _telemetry.value = _telemetry.value.copy(clippingDetected = clipping)
+            }
+        }
+        scope.launch {
+            SystemEventFlow.clipFraction.collect { fraction ->
+                _telemetry.value = _telemetry.value.copy(clipFraction = fraction)
+            }
+        }
     }
 
     override fun setDetectionThreshold(threshold: Double) {

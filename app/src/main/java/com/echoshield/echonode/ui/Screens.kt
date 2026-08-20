@@ -79,10 +79,14 @@ import com.google.maps.android.compose.MarkerState
 import com.google.maps.android.compose.Circle
 import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
+import com.echoshield.echonode.core.contracts.ConsensusSnapshot
+import com.echoshield.echonode.core.contracts.FirstAidStep
 import com.echoshield.echonode.core.contracts.MeshStatus
 import com.echoshield.echonode.core.contracts.SafetyStatus
+import com.echoshield.echonode.core.contracts.SourceEstimateInfo
 import com.echoshield.echonode.core.contracts.ThreatZone
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 import com.echoshield.echonode.core.contracts.ConversationMessage
 import com.echoshield.echonode.viewmodel.MainViewModel
 
@@ -116,6 +120,8 @@ fun DashboardScreen(
     )
 
     var showOptions by remember { mutableStateOf(false) }
+    val bodyScroll = rememberScrollState()
+    val sensorOnline = uiState.isServiceRunning
 
     Column(
         modifier = modifier
@@ -131,7 +137,14 @@ fun DashboardScreen(
             onCancel = {}
         )
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(20.dp))
+
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(bodyScroll),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
 
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -144,6 +157,7 @@ fun DashboardScreen(
                     .padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                val ringColor = if (sensorOnline) AccentGreen else SecondaryText
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier.size(120.dp)
@@ -151,20 +165,20 @@ fun DashboardScreen(
                     Box(
                         modifier = Modifier
                             .size(120.dp)
-                            .alpha(pulseAlpha * 0.3f)
+                            .alpha(if (sensorOnline) pulseAlpha * 0.3f else 0.12f)
                             .clip(CircleShape)
-                            .background(AccentGreen.copy(alpha = 0.2f))
+                            .background(ringColor.copy(alpha = 0.2f))
                     )
                     Box(
                         modifier = Modifier
                             .size(80.dp)
                             .clip(CircleShape)
-                            .background(AccentGreen)
-                            .border(3.dp, AccentGreen.copy(alpha = 0.5f), CircleShape),
+                            .background(ringColor)
+                            .border(3.dp, ringColor.copy(alpha = 0.5f), CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = if (uiState.isServiceRunning) "✓" else "○",
+                            text = if (sensorOnline) "✓" else "○",
                             fontSize = 32.sp,
                             fontWeight = FontWeight.Bold,
                             color = CardWhite
@@ -175,7 +189,7 @@ fun DashboardScreen(
                 Spacer(modifier = Modifier.height(16.dp))
 
                 Text(
-                    text = if (uiState.isServiceRunning) "Monitoring Active" else "Standby",
+                    text = if (sensorOnline) "Monitoring Active" else "Standby",
                     fontSize = 22.sp,
                     fontWeight = FontWeight.Bold,
                     color = DarkText
@@ -194,6 +208,19 @@ fun DashboardScreen(
                     fontSize = 14.sp,
                     color = SecondaryText
                 )
+
+                if (sensorOnline) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = if (uiState.sentinelActive) {
+                            "Listening on this device"
+                        } else {
+                            "Standing by — a peer holds sentinel duty"
+                        },
+                        fontSize = 12.sp,
+                        color = SecondaryText
+                    )
+                }
             }
         }
 
@@ -243,7 +270,8 @@ fun DashboardScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "ML: ${uiState.modelTopLabel}",
+                        text = "ML: ${uiState.modelTopLabel} " +
+                            String.format("(%.2f)", uiState.modelGunshotConfidence),
                         fontSize = 12.sp,
                         color = SecondaryText
                     )
@@ -251,6 +279,19 @@ fun DashboardScreen(
                         text = String.format("%.0f / %.0f", uiState.currentAmplitude, uiState.detectionThreshold),
                         fontSize = 12.sp,
                         color = SecondaryText
+                    )
+                }
+
+                // Clipping is both a detection cue and a warning that the ML input is
+                // distorted, so the operator needs to see it rather than guess.
+                if (uiState.clippingDetected) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "⚠ Mic clipping ${String.format("%.1f%%", uiState.clipFraction * 100)} — " +
+                            "very loud nearby sound; detection threshold relaxed",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = AccentYellow
                     )
                 }
 
@@ -265,7 +306,18 @@ fun DashboardScreen(
             }
         }
 
-        Spacer(modifier = Modifier.weight(1f))
+        if (uiState.consensus.active) {
+            Spacer(modifier = Modifier.height(16.dp))
+            ConsensusCard(consensus = uiState.consensus)
+        }
+
+        uiState.sourceEstimate?.let { estimate ->
+            Spacer(modifier = Modifier.height(16.dp))
+            SourceEstimateCard(estimate = estimate)
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+        }
 
         Button(
             onClick = onSimulateGunshot,
@@ -637,6 +689,8 @@ fun IncidentReportScreen(
     serverRecommendedAction: String,
     liveUpdates: List<String>,
     conversationMessages: List<ConversationMessage>,
+    sourceEstimate: SourceEstimateInfo?,
+    firstAidSteps: List<FirstAidStep>,
     companionsCount: Int,
     injuredCount: Int,
     roomNumber: String,
@@ -708,7 +762,8 @@ fun IncidentReportScreen(
                     threatRadiusMeters = threatRadiusMeters,
                     threatZones = threatZones,
                     serverRecommendedAction = serverRecommendedAction,
-                    liveUpdates = liveUpdates
+                    liveUpdates = liveUpdates,
+                    sourceEstimate = sourceEstimate
                 )
                 IncidentTab.CHAT -> IncidentChatTab(
                     meshStatus = meshStatus,
@@ -716,6 +771,10 @@ fun IncidentReportScreen(
                     conversationMessages = conversationMessages,
                     onNotesChange = onNotesChange,
                     onSend = onSendChat
+                )
+                IncidentTab.AID -> FirstAidTab(
+                    steps = firstAidSteps,
+                    injuredCount = injuredCount
                 )
                 IncidentTab.STATUS -> IncidentStatusTab(
                     companionsCount = companionsCount,
@@ -736,6 +795,7 @@ fun IncidentReportScreen(
 private enum class IncidentTab(val label: String) {
     MAP("Map"),
     CHAT("Chat"),
+    AID("First Aid"),
     STATUS("Status")
 }
 
@@ -755,7 +815,8 @@ private fun IncidentMapTab(
     threatRadiusMeters: Double,
     threatZones: List<ThreatZone>,
     serverRecommendedAction: String,
-    liveUpdates: List<String>
+    liveUpdates: List<String>,
+    sourceEstimate: SourceEstimateInfo? = null
 ) {
     val scrollState = rememberScrollState()
     val hasCoordinates = locationLatitude != 0.0 || locationLongitude != 0.0
@@ -903,6 +964,13 @@ private fun IncidentMapTab(
         }
 
         Spacer(modifier = Modifier.height(6.dp))
+
+        // The map draws a confident circle; this says how that circle was derived so
+        // nobody reads a coarse cluster centroid as a precise location.
+        sourceEstimate?.let { estimate ->
+            SourceEstimateCard(estimate = estimate)
+            Spacer(modifier = Modifier.height(6.dp))
+        }
 
         // ── Proximity-based action card ───────────────────────────────────────
         Card(
@@ -1293,6 +1361,230 @@ private fun IncidentStatusTab(
     }
 }
 
+/**
+ * Live anti-herding vote. One phone hearing something is never enough to move a whole
+ * building, so this shows how many *independent* devices have corroborated on their
+ * own microphones and how many are needed.
+ */
+@Composable
+private fun ConsensusCard(consensus: ConsensusSnapshot) {
+    val progress = if (consensus.required <= 0) {
+        0f
+    } else {
+        (consensus.confirmations.toFloat() / consensus.required).coerceIn(0f, 1f)
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF8E6))
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Verifying detection",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = DarkText
+                )
+                Text(
+                    text = "${consensus.confirmations}/${consensus.required}",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AccentYellow
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            LinearProgressIndicator(
+                progress = progress,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(8.dp)
+                    .clip(RoundedCornerShape(4.dp)),
+                color = AccentYellow,
+                trackColor = TrackGray
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(
+                text = "Nearby phones are each checking their own microphone. " +
+                    "${consensus.independentConfirmations} independent confirmation" +
+                    (if (consensus.independentConfirmations == 1) "" else "s") +
+                    " so far — no alert is raised on one device alone.",
+                fontSize = 12.sp,
+                color = SecondaryText
+            )
+        }
+    }
+}
+
+/**
+ * Where the shot came from, and how much to trust it. A TDoA fix from synchronised
+ * arrival times is metres-accurate; a centroid of confirming phones is only "somewhere
+ * in this cluster", so the card says which one the user is looking at.
+ */
+@Composable
+private fun SourceEstimateCard(estimate: SourceEstimateInfo) {
+    val methodLabel = when (estimate.method) {
+        "tdoa_multilateration" -> "Triangulated (arrival-time)"
+        "weighted_centroid" -> "Estimated (detecting cluster)"
+        else -> "Single device report"
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFF5F7FB))
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "Source location",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = DarkText
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(text = methodLabel, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = PrimaryBlue)
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            EstimateRow("Confirming devices", "${estimate.contributingNodes}")
+            EstimateRow(
+                "Uncertainty",
+                "±${estimate.spreadMeters.roundToInt()} m"
+            )
+            if (estimate.floorOffset != 0) {
+                EstimateRow(
+                    "Vertical",
+                    "~${estimate.floorOffset} floor(s) above the lowest device"
+                )
+            }
+            if (estimate.timingResidualMs.isFinite()) {
+                EstimateRow(
+                    "Timing fit",
+                    String.format("%.1f ms residual", estimate.timingResidualMs)
+                )
+            }
+
+            if (!estimate.isTriangulated) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Not enough time-synchronised devices for a true fix — " +
+                        "this is the centre of the phones that heard it.",
+                    fontSize = 11.sp,
+                    color = SecondaryText
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EstimateRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(text = label, fontSize = 12.sp, color = SecondaryText)
+        Text(text = value, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = DarkText)
+    }
+}
+
+/**
+ * Bystander first aid. Uncontrolled bleeding kills faster than anything else a
+ * bystander can treat, so it leads — and every step is written to be followed by
+ * someone with no training while they are frightened.
+ */
+@Composable
+private fun FirstAidTab(steps: List<FirstAidStep>, injuredCount: Int) {
+    val scrollState = rememberScrollState()
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(scrollState),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFFDECEE)),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = if (injuredCount > 0) {
+                        "$injuredCount injured reported — control bleeding first."
+                    } else {
+                        "If someone is hurt, control life-threatening bleeding first."
+                    },
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AccentRed
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Call emergency services as soon as it is safe.",
+                    fontSize = 12.sp,
+                    color = SecondaryText
+                )
+            }
+        }
+
+        steps.forEachIndexed { index, step ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = CardWhite),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Row(modifier = Modifier.padding(16.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .size(26.dp)
+                            .clip(CircleShape)
+                            .background(AccentRed),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "${index + 1}",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = CardWhite
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = step.title,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = DarkText
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(text = step.detail, fontSize = 13.sp, color = SecondaryText, lineHeight = 18.sp)
+                    }
+                }
+            }
+        }
+
+        Text(
+            text = "General guidance only, not a substitute for professional medical care.",
+            fontSize = 11.sp,
+            color = SecondaryText,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+    }
+}
+
 @Composable
 private fun LiveUpdateRow(text: String) {
     Card(
@@ -1395,6 +1687,14 @@ fun BarricadeScreen(
                     Text("• Lock all doors", color = CardWhite, fontSize = 14.sp)
                     Text("• Stay away from windows", color = CardWhite, fontSize = 14.sp)
                     Text("• Silence devices", color = CardWhite, fontSize = 14.sp)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "If someone is hit: press hard on the wound and do not let up.",
+                        color = CardWhite,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        textAlign = TextAlign.Center
+                    )
                 }
             }
 

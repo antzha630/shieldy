@@ -35,8 +35,44 @@ data class DetectionTelemetry(
     val modelGunshotConfidence: Float,
     val modelTopLabel: String,
     val cooldownRemainingMs: Long,
-    val serviceRunning: Boolean
+    val serviceRunning: Boolean,
+    // Microphone saturation. A close gunshot pins a phone mic to the 16-bit rails,
+    // which both signals a nearby impulse and degrades the ML input waveform.
+    val clippingDetected: Boolean = false,
+    val clipFraction: Float = 0f
 )
+
+/**
+ * Live view of the anti-herding vote for the current detection session, so the UI can
+ * show *why* the fleet has or has not escalated instead of a silent yes/no.
+ */
+data class ConsensusSnapshot(
+    val sessionId: String = "",
+    val active: Boolean = false,
+    val confirmations: Int = 0,
+    val independentConfirmations: Int = 0,
+    val totalVotes: Int = 0,
+    val required: Int = 1,
+    val startedAtMs: Long = 0L
+)
+
+/** Triangulated origin of a confirmed detection, with its honest error bounds. */
+data class SourceEstimateInfo(
+    val latitude: Double,
+    val longitude: Double,
+    val altitude: Double = Double.NaN,
+    /** Storeys above the lowest confirming phone, from altitude spread. */
+    val floorOffset: Int = 0,
+    /** "tdoa_multilateration" | "weighted_centroid" | "single_report" */
+    val method: String = "single_report",
+    val contributingNodes: Int = 0,
+    /** Radius covering the confirming cluster: a crude confidence bound, in metres. */
+    val spreadMeters: Double = 0.0,
+    /** RMS timing residual of the TDoA solve; NaN when no TDoA fix was possible. */
+    val timingResidualMs: Double = Double.NaN
+) {
+    val isTriangulated: Boolean get() = method == "tdoa_multilateration"
+}
 
 data class EchoUiState(
     val appState: AppState = AppState.LISTENING,
@@ -75,7 +111,17 @@ data class EchoUiState(
     val serverPoliceBrief: String = "",
     val serverMedicalBrief: String = "",
     val liveUpdates: List<String> = emptyList(),
-    val conversationMessages: List<ConversationMessage> = emptyList()
+    val conversationMessages: List<ConversationMessage> = emptyList(),
+    val consensus: ConsensusSnapshot = ConsensusSnapshot(),
+    val sourceEstimate: SourceEstimateInfo? = null,
+    val sentinelActive: Boolean = false,
+    val firstAidSteps: List<FirstAidStep> = emptyList()
+)
+
+/** One piece of bystander first-aid guidance, ordered by what saves lives soonest. */
+data class FirstAidStep(
+    val title: String,
+    val detail: String
 )
 
 data class ThreatZone(
@@ -111,10 +157,17 @@ data class WakeClassifyEvent(
 data class ResponseTriggerEvent(
     val sessionId: String,
     val confirmedByNodes: List<String>,
+    /** Position of the node that raised the alarm (fallback only). */
     val latitude: Double,
     val longitude: Double,
-    val timestamp: Long
-)
+    val timestamp: Long,
+    /** Triangulated source; null when no confirming node reported a usable fix. */
+    val estimate: SourceEstimateInfo? = null
+) {
+    /** Best available source position: triangulated when we have it, raiser otherwise. */
+    val sourceLatitude: Double get() = estimate?.latitude ?: latitude
+    val sourceLongitude: Double get() = estimate?.longitude ?: longitude
+}
 
 data class IncidentReportEvent(
     val appState: AppState,
@@ -141,6 +194,7 @@ interface MeshGateway {
     val wakeClassifyRequests: SharedFlow<WakeClassifyEvent>
     val responseTriggered: SharedFlow<ResponseTriggerEvent>
     val sentinelDutyActive: StateFlow<Boolean>
+    val consensusState: StateFlow<ConsensusSnapshot>
 
     fun startMesh()
     fun stopMesh()
@@ -149,7 +203,15 @@ interface MeshGateway {
     fun broadcastAllClear()
 
     fun broadcastWakeClassify(latitude: Double, longitude: Double)
-    fun submitClassifyVote(sessionId: String, isGunshot: Boolean, confidence: Float)
+    fun submitClassifyVote(
+        sessionId: String,
+        isGunshot: Boolean,
+        confidence: Float,
+        latitude: Double = Double.NaN,
+        longitude: Double = Double.NaN,
+        altitude: Double = Double.NaN,
+        detectedAtMs: Long = System.currentTimeMillis()
+    )
     fun publishConfirmedResponse(trigger: ResponseTriggerEvent)
     fun submitIncidentReport(report: IncidentReportEvent)
     fun disarmSentinel()

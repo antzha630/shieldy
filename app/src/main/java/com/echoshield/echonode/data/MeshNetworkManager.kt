@@ -9,7 +9,10 @@ import com.echoshield.echonode.comms.CloudRelayResult
 import com.echoshield.echonode.comms.DutyAssignment
 import com.echoshield.echonode.comms.LeaderDutyCoordinator
 import com.echoshield.echonode.comms.RetrofitCloudRelayClient
+import com.echoshield.echonode.core.Triangulation
+import com.echoshield.echonode.core.contracts.ConsensusSnapshot
 import com.echoshield.echonode.core.contracts.IncidentReportEvent
+import com.echoshield.echonode.core.contracts.SourceEstimateInfo
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.nearby.Nearby
 import com.google.android.gms.nearby.connection.AdvertisingOptions
@@ -40,6 +43,7 @@ import kotlinx.coroutines.launch
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.roundToLong
 import kotlin.random.Random
 
 class MeshNetworkManager(context: Context) {
@@ -82,16 +86,21 @@ class MeshNetworkManager(context: Context) {
         const val PAYLOAD_SENTINEL_DISARM = "SENTINEL:DISARM"
         const val PAYLOAD_RESPONSE_TRIGGER = "RESPONSE:TRIGGER"
 
+        // Clock synchronisation. Triangulation compares *when* each phone heard the
+        // shot, so arrival times from different phones must live on one time base.
+        const val PAYLOAD_TIME_PING = "TIME:PING"
+        const val PAYLOAD_TIME_PONG = "TIME:PONG"
+        private const val CLOCK_SYNC_INTERVAL_MS = 20_000L
+        /** Offsets older than this are treated as unknown rather than trusted. */
+        private const val CLOCK_SAMPLE_TTL_MS = 120_000L
+        /** Round trips longer than this are too noisy to derive an offset from. */
+        private const val MAX_CLOCK_RTT_MS = 2_000.0
+        /** Uncertainty we claim for our own detections (audio frame quantisation). */
+        private const val LOCAL_TIMING_UNCERTAINTY_MS = 5.0
+
         /** Great-circle distance in metres between two WGS84 coordinates. */
-        fun haversineMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-            val earthRadius = 6_371_000.0
-            val dLat = Math.toRadians(lat2 - lat1)
-            val dLon = Math.toRadians(lon2 - lon1)
-            val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
-                Math.sin(dLon / 2) * Math.sin(dLon / 2)
-            return earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-        }
+        fun haversineMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double =
+            Triangulation.haversineMeters(lat1, lon1, lat2, lon2)
 
         @Volatile
         private var instance: MeshNetworkManager? = null
@@ -142,6 +151,13 @@ class MeshNetworkManager(context: Context) {
     private val _sentinelDutyActive = MutableStateFlow(_dutyAssignment.value.audioSentinelDuty)
     val sentinelDutyActive: StateFlow<Boolean> = _sentinelDutyActive.asStateFlow()
 
+    /** Live vote tally for the current session, so the UI can show why we did or did not escalate. */
+    private val _consensusState = MutableStateFlow(ConsensusSnapshot())
+    val consensusState: StateFlow<ConsensusSnapshot> = _consensusState.asStateFlow()
+
+    /** nodeId -> most recent usable clock-offset measurement for that peer. */
+    private val peerClockOffsets = ConcurrentHashMap<String, ClockSample>()
+
     private val pendingVoteSessions = ConcurrentHashMap<String, VoteSession>()
     private val orphanVotes = ConcurrentHashMap<String, ConcurrentHashMap<String, ClassifyVote>>()
     private val orphanVoteTimestamps = ConcurrentHashMap<String, Long>()
@@ -156,6 +172,7 @@ class MeshNetworkManager(context: Context) {
     private var isMeshStarted = false
     private var dutyRotationJob: Job? = null
     private var voteCleanupJob: Job? = null
+    private var clockSyncJob: Job? = null
 
     enum class MeshStatus {
         IDLE,
@@ -462,6 +479,7 @@ class MeshNetworkManager(context: Context) {
         Log.i(TAG, "startMesh: node=$localEndpointName")
         startDutyRotation()
         startVoteCleanup()
+        startClockSync()
         startAdvertising()
         startDiscovery()
         startMeshRetryLoop()
@@ -505,12 +523,15 @@ class MeshNetworkManager(context: Context) {
         meshRetryJob = null
         stopDutyRotation()
         stopVoteCleanup()
+        stopClockSync()
         stopAdvertising()
         stopDiscovery()
         disconnectAll()
         pendingVoteSessions.clear()
         orphanVotes.clear()
         orphanVoteTimestamps.clear()
+        peerClockOffsets.clear()
+        _consensusState.value = ConsensusSnapshot()
     }
 
     fun stopAdvertising() {
@@ -625,14 +646,16 @@ class MeshNetworkManager(context: Context) {
         confirmedByNodes: List<String>,
         latitude: Double,
         longitude: Double,
-        timestamp: Long = System.currentTimeMillis()
+        timestamp: Long = System.currentTimeMillis(),
+        estimate: SourceEstimateInfo? = null
     ) {
         val trigger = ResponseTrigger(
             sessionId = sessionId,
             confirmedByNodes = confirmedByNodes,
             latitude = latitude,
             longitude = longitude,
-            timestamp = timestamp
+            timestamp = timestamp,
+            estimate = estimate
         )
         val payload = responseTriggerPayload(trigger)
 
@@ -677,6 +700,16 @@ class MeshNetworkManager(context: Context) {
             }
             message.startsWith(PAYLOAD_RESPONSE_TRIGGER) -> {
                 handleResponseTrigger(sourceEndpointId, message)
+                return
+            }
+            // Clock sync is strictly point-to-point: never relayed, never deduped,
+            // because an offset is only meaningful for the direct link it measured.
+            message.startsWith(PAYLOAD_TIME_PING) -> {
+                handleTimePing(sourceEndpointId, message)
+                return
+            }
+            message.startsWith(PAYLOAD_TIME_PONG) -> {
+                handleTimePong(message)
                 return
             }
         }
@@ -979,56 +1012,38 @@ class MeshNetworkManager(context: Context) {
             votes.values.count { it.isGunshot && it.nodeId != sourceNodeId }
 
         /**
-         * Estimate the source location from every confirming node that reported a
-         * usable fix, weighted by classifier confidence. With coarse GPS and
-         * unsynchronised clocks a confidence-weighted centroid of the detecting
-         * cluster is the honest achievable estimate; the per-vote coordinates and
-         * timestamps now carried make a true TDoA solve a later upgrade. Returns null
-         * when no confirming node reported coordinates.
+         * Locate the source from every node that independently confirmed the shot.
+         *
+         * Delegates to [Triangulation], which multilaterates from arrival times when
+         * enough phones report a synchronised clock and falls back to a
+         * confidence-weighted centroid otherwise. Returns null when no confirming
+         * node reported usable coordinates.
          */
-        fun estimateSource(): SourceEstimate? {
-            val located = votes.values.filter {
-                it.isGunshot && it.latitude.isFinite() && it.longitude.isFinite() &&
-                    !(it.latitude == 0.0 && it.longitude == 0.0)
-            }
-            if (located.isEmpty()) return null
+        fun estimateSource(): SourceEstimateInfo? {
+            val observations = votes.values
+                .filter { it.isGunshot }
+                .map { vote ->
+                    Triangulation.Observation(
+                        nodeId = vote.nodeId,
+                        latitude = vote.latitude,
+                        longitude = vote.longitude,
+                        altitude = vote.altitude,
+                        confidence = vote.confidence,
+                        detectedAtMs = vote.detectedAtMs,
+                        timingUncertaintyMs = vote.timingUncertaintyMs
+                    )
+                }
 
-            var weightSum = 0.0
-            var latAcc = 0.0
-            var lonAcc = 0.0
-            val altitudes = mutableListOf<Double>()
-            located.forEach { vote ->
-                val w = vote.confidence.toDouble().coerceIn(0.05, 1.0)
-                weightSum += w
-                latAcc += vote.latitude * w
-                lonAcc += vote.longitude * w
-                if (vote.altitude.isFinite()) altitudes.add(vote.altitude)
-            }
-            if (weightSum <= 0.0) return null
-
-            val estLat = latAcc / weightSum
-            val estLon = lonAcc / weightSum
-            val estAlt = if (altitudes.isNotEmpty()) altitudes.average() else Double.NaN
-
-            // Relative floor offset from the lowest confirming node.
-            val floor = if (altitudes.size >= 2) {
-                val spread = (altitudes.maxOrNull() ?: 0.0) - (altitudes.minOrNull() ?: 0.0)
-                (spread / FLOOR_HEIGHT_METERS).toInt()
-            } else 0
-
-            // Geographic spread of contributors as a crude confidence radius (metres).
-            val spreadMeters = located.maxOfOrNull { vote ->
-                haversineMeters(estLat, estLon, vote.latitude, vote.longitude)
-            } ?: 0.0
-
-            return SourceEstimate(
-                latitude = estLat,
-                longitude = estLon,
-                altitude = estAlt,
-                floorOffset = floor,
-                method = if (located.size >= 2) "weighted_centroid" else "single_report",
-                contributingNodes = located.size,
-                spreadMeters = spreadMeters
+            val fix = Triangulation.solve(observations) ?: return null
+            return SourceEstimateInfo(
+                latitude = fix.latitude,
+                longitude = fix.longitude,
+                altitude = fix.altitude,
+                floorOffset = fix.floorOffset,
+                method = fix.method,
+                contributingNodes = fix.contributingNodes,
+                spreadMeters = fix.spreadMeters,
+                timingResidualMs = fix.timingResidualMs
             )
         }
     }
@@ -1040,33 +1055,31 @@ class MeshNetworkManager(context: Context) {
         val timestamp: Long,
         val latitude: Double = Double.NaN,
         val longitude: Double = Double.NaN,
-        val altitude: Double = Double.NaN
-    )
-
-    data class SourceEstimate(
-        val latitude: Double,
-        val longitude: Double,
-        val altitude: Double,
-        val floorOffset: Int,
-        val method: String,
-        val contributingNodes: Int,
-        val spreadMeters: Double
+        val altitude: Double = Double.NaN,
+        /**
+         * When this node's microphone heard the impulse, converted to *our* clock.
+         * [Triangulation.NO_TIMING] when the peer's clock is not synchronised, in
+         * which case the vote still counts toward consensus but not toward the
+         * TDoA solve.
+         */
+        val detectedAtMs: Long = Triangulation.NO_TIMING,
+        /** How well [detectedAtMs] is known, in ms (half the measured round trip). */
+        val timingUncertaintyMs: Double = Double.NaN
     )
 
     data class ResponseTrigger(
         val sessionId: String,
         val confirmedByNodes: List<String>,
+        /** The raising node's own position; used only when triangulation found nothing. */
         val latitude: Double,
         val longitude: Double,
         val timestamp: Long,
-        // Triangulated source estimate (falls back to the raising node's fix).
-        val estimatedLatitude: Double = latitude,
-        val estimatedLongitude: Double = longitude,
-        val estimatedAltitude: Double = Double.NaN,
-        val floorOffset: Int = 0,
-        val localizationMethod: String = "single_report",
-        val spreadMeters: Double = 0.0
-    )
+        /** Triangulated source, or null when no confirming node reported a fix. */
+        val estimate: SourceEstimateInfo? = null
+    ) {
+        val estimatedLatitude: Double get() = estimate?.latitude ?: latitude
+        val estimatedLongitude: Double get() = estimate?.longitude ?: longitude
+    }
 
     fun setConfirmationThreshold(threshold: Int) {
         // A positive value pins the threshold (manual/testing). Zero or negative
@@ -1098,7 +1111,23 @@ class MeshNetworkManager(context: Context) {
         return if (override >= 1) override else requiredConfirmations()
     }
 
-    fun broadcastWakeClassify(latitude: Double, longitude: Double) {
+    /**
+     * Raise a candidate detection: ask every peer to classify its *own* microphone
+     * audio for this moment and vote.
+     *
+     * @param confidence this node's own classifier score. It is recorded as-is rather
+     *   than as a perfect 1.0, so the raising node cannot dominate the weighted fix —
+     *   the node most likely to be wrong is the one that fired first.
+     * @param detectedAtMs when our microphone heard the impulse (local clock), which
+     *   peers convert onto their own clocks for the TDoA solve.
+     */
+    fun broadcastWakeClassify(
+        latitude: Double,
+        longitude: Double,
+        confidence: Float = 1.0f,
+        altitude: Double = Double.NaN,
+        detectedAtMs: Long = System.currentTimeMillis()
+    ) {
         val sessionId = createMessageId()
         val payload = buildString {
             append(PAYLOAD_WAKE_CLASSIFY)
@@ -1112,6 +1141,12 @@ class MeshNetworkManager(context: Context) {
             append(longitude)
             append("|")
             append(System.currentTimeMillis())
+            append("|")
+            append(detectedAtMs)
+            append("|")
+            append(altitude)
+            append("|")
+            append(confidence)
         }
 
         val session = VoteSession(
@@ -1124,16 +1159,20 @@ class MeshNetworkManager(context: Context) {
         session.votes[localEndpointName] = ClassifyVote(
             nodeId = localEndpointName,
             isGunshot = true,
-            confidence = 1.0f,
+            confidence = confidence,
             timestamp = System.currentTimeMillis(),
             latitude = latitude,
-            longitude = longitude
+            longitude = longitude,
+            altitude = altitude,
+            detectedAtMs = detectedAtMs,
+            timingUncertaintyMs = LOCAL_TIMING_UNCERTAINTY_MS
         )
         pendingVoteSessions[sessionId] = session
+        publishConsensus(session, active = true)
 
         markMessageSeen("wake:$sessionId")
         sendPayloadToAllEndpoints(payload)
-        Log.i(TAG, "Broadcast WAKE_CLASSIFY sessionId=$sessionId lat=$latitude lon=$longitude")
+        Log.i(TAG, "Broadcast WAKE_CLASSIFY sessionId=$sessionId lat=$latitude lon=$longitude conf=$confidence")
 
         checkVoteThreshold(sessionId)
     }
@@ -1144,7 +1183,8 @@ class MeshNetworkManager(context: Context) {
         confidence: Float,
         latitude: Double = Double.NaN,
         longitude: Double = Double.NaN,
-        altitude: Double = Double.NaN
+        altitude: Double = Double.NaN,
+        detectedAtMs: Long = Triangulation.NO_TIMING
     ) {
         val payload = buildString {
             append(PAYLOAD_CLASSIFY_VOTE)
@@ -1164,6 +1204,8 @@ class MeshNetworkManager(context: Context) {
             append(longitude)
             append("|")
             append(altitude)
+            append("|")
+            append(detectedAtMs)
         }
 
         markMessageSeen("vote:$sessionId:$localEndpointName")
@@ -1178,8 +1220,16 @@ class MeshNetworkManager(context: Context) {
                 timestamp = System.currentTimeMillis(),
                 latitude = latitude,
                 longitude = longitude,
-                altitude = altitude
+                altitude = altitude,
+                // Our own detection needs no clock conversion.
+                detectedAtMs = detectedAtMs,
+                timingUncertaintyMs = if (detectedAtMs == Triangulation.NO_TIMING) {
+                    Double.NaN
+                } else {
+                    LOCAL_TIMING_UNCERTAINTY_MS
+                }
             )
+            publishConsensus(session, active = true)
             checkVoteThreshold(sessionId)
         }
     }
@@ -1227,7 +1277,27 @@ class MeshNetworkManager(context: Context) {
                 longitude = longitude
             )
         }
+
+        // The raising node's detection is itself a vote, and carries the position and
+        // arrival time its own microphone measured — without it the raiser would be
+        // missing from the triangulation it started.
+        val raiserDetectedAtMs = parts.getOrNull(6)?.toLongOrNull() ?: Triangulation.NO_TIMING
+        val raiserAltitude = parts.getOrNull(7)?.toDoubleOrNull() ?: Double.NaN
+        val raiserConfidence = parts.getOrNull(8)?.toFloatOrNull() ?: 1.0f
+        val raiserTiming = toLocalClock(sourceNodeId, raiserDetectedAtMs)
+        session.votes[sourceNodeId] = ClassifyVote(
+            nodeId = sourceNodeId,
+            isGunshot = true,
+            confidence = raiserConfidence,
+            timestamp = timestamp,
+            latitude = latitude,
+            longitude = longitude,
+            altitude = raiserAltitude,
+            detectedAtMs = raiserTiming?.first ?: Triangulation.NO_TIMING,
+            timingUncertaintyMs = raiserTiming?.second ?: Double.NaN
+        )
         applyOrphanVotes(sessionId, session)
+        publishConsensus(session, active = true)
 
         sendPayloadToAllEndpoints(message, excludeEndpointId = sourceEndpointId)
 
@@ -1258,6 +1328,9 @@ class MeshNetworkManager(context: Context) {
         val voterLat = parts.getOrNull(6)?.toDoubleOrNull() ?: Double.NaN
         val voterLon = parts.getOrNull(7)?.toDoubleOrNull() ?: Double.NaN
         val voterAlt = parts.getOrNull(8)?.toDoubleOrNull() ?: Double.NaN
+        // The peer stamped this on *its* clock; only usable once mapped onto ours.
+        val voterDetectedAtMs = parts.getOrNull(9)?.toLongOrNull() ?: Triangulation.NO_TIMING
+        val voterTiming = toLocalClock(voterNodeId, voterDetectedAtMs)
 
         val dedupeKey = "vote:$sessionId:$voterNodeId"
         if (!markMessageSeen(dedupeKey)) {
@@ -1274,7 +1347,9 @@ class MeshNetworkManager(context: Context) {
             timestamp = timestamp,
             latitude = voterLat,
             longitude = voterLon,
-            altitude = voterAlt
+            altitude = voterAlt,
+            detectedAtMs = voterTiming?.first ?: Triangulation.NO_TIMING,
+            timingUncertaintyMs = voterTiming?.second ?: Double.NaN
         )
 
         val session = pendingVoteSessions[sessionId]
@@ -1284,8 +1359,13 @@ class MeshNetworkManager(context: Context) {
         }
 
         session.votes[voterNodeId] = vote
+        publishConsensus(session, active = true)
 
-        Log.d(TAG, "Vote recorded: session=$sessionId voter=$voterNodeId gunshot=$isGunshot (${session.confirmedCount()}/${confirmationThreshold} needed)")
+        Log.d(
+            TAG,
+            "Vote recorded: session=$sessionId voter=$voterNodeId gunshot=$isGunshot " +
+                "(${session.confirmedCount()}/${effectiveConfirmationThreshold()} needed)"
+        )
 
         checkVoteThreshold(sessionId)
     }
@@ -1349,19 +1429,13 @@ class MeshNetworkManager(context: Context) {
                 .filter { it.value.isGunshot }
                 .map { it.key }
 
-            val estimate = session.estimateSource()
             val trigger = ResponseTrigger(
                 sessionId = sessionId,
                 confirmedByNodes = confirmedNodes,
                 latitude = session.latitude,
                 longitude = session.longitude,
                 timestamp = System.currentTimeMillis(),
-                estimatedLatitude = estimate?.latitude ?: session.latitude,
-                estimatedLongitude = estimate?.longitude ?: session.longitude,
-                estimatedAltitude = estimate?.altitude ?: Double.NaN,
-                floorOffset = estimate?.floorOffset ?: 0,
-                localizationMethod = estimate?.method ?: "single_report",
-                spreadMeters = estimate?.spreadMeters ?: 0.0
+                estimate = session.estimateSource()
             )
 
             scope.launch {
@@ -1371,13 +1445,18 @@ class MeshNetworkManager(context: Context) {
             markMessageSeen("response:$sessionId")
             broadcastResponseTrigger(trigger)
             publishResponseTriggerToCloud(trigger, sourceEndpointId = null)
+            publishConsensus(session, active = false)
             pendingVoteSessions.remove(sessionId)
             clearOrphanVotes(sessionId)
+            val estimate = trigger.estimate
             Log.w(
                 TAG,
                 "RESPONSE TRIGGERED! session=$sessionId confirmedBy=$confirmedNodes " +
                     "est=(${trigger.estimatedLatitude},${trigger.estimatedLongitude}) " +
-                    "method=${trigger.localizationMethod} spread=${"%.1f".format(trigger.spreadMeters)}m floor=${trigger.floorOffset}"
+                    "method=${estimate?.method ?: "none"} " +
+                    "spread=${"%.1f".format(estimate?.spreadMeters ?: 0.0)}m " +
+                    "floor=${estimate?.floorOffset ?: 0} " +
+                    "residual=${"%.1f".format(estimate?.timingResidualMs ?: Double.NaN)}ms"
             )
         }
     }
@@ -1400,13 +1479,17 @@ class MeshNetworkManager(context: Context) {
             append("|")
             append(trigger.estimatedLongitude)
             append("|")
-            append(trigger.estimatedAltitude)
+            append(trigger.estimate?.altitude ?: Double.NaN)
             append("|")
-            append(trigger.floorOffset)
+            append(trigger.estimate?.floorOffset ?: 0)
             append("|")
-            append(trigger.localizationMethod)
+            append(trigger.estimate?.method ?: Triangulation.METHOD_SINGLE)
             append("|")
-            append(trigger.spreadMeters)
+            append(trigger.estimate?.spreadMeters ?: 0.0)
+            append("|")
+            append(trigger.estimate?.timingResidualMs ?: Double.NaN)
+            append("|")
+            append(trigger.estimate?.contributingNodes ?: 0)
         }
     }
 
@@ -1426,12 +1509,14 @@ class MeshNetworkManager(context: Context) {
         val confirmedNodes = parts[4].split(",").filter { it.isNotBlank() }
         val timestamp = parts[5].toLongOrNull() ?: System.currentTimeMillis()
         // Triangulated estimate fields are optional (older peers omit them).
-        val estLat = parts.getOrNull(6)?.toDoubleOrNull() ?: latitude
-        val estLon = parts.getOrNull(7)?.toDoubleOrNull() ?: longitude
+        val estLat = parts.getOrNull(6)?.toDoubleOrNull()
+        val estLon = parts.getOrNull(7)?.toDoubleOrNull()
         val estAlt = parts.getOrNull(8)?.toDoubleOrNull() ?: Double.NaN
         val floorOffset = parts.getOrNull(9)?.toIntOrNull() ?: 0
-        val method = parts.getOrNull(10)?.takeIf { it.isNotBlank() } ?: "single_report"
+        val method = parts.getOrNull(10)?.takeIf { it.isNotBlank() } ?: Triangulation.METHOD_SINGLE
         val spreadMeters = parts.getOrNull(11)?.toDoubleOrNull() ?: 0.0
+        val timingResidualMs = parts.getOrNull(12)?.toDoubleOrNull() ?: Double.NaN
+        val contributingNodes = parts.getOrNull(13)?.toIntOrNull() ?: confirmedNodes.size
 
         val dedupeKey = "response:$sessionId"
         if (!markMessageSeen(dedupeKey)) return
@@ -1444,12 +1529,20 @@ class MeshNetworkManager(context: Context) {
             latitude = latitude,
             longitude = longitude,
             timestamp = timestamp,
-            estimatedLatitude = estLat,
-            estimatedLongitude = estLon,
-            estimatedAltitude = estAlt,
-            floorOffset = floorOffset,
-            localizationMethod = method,
-            spreadMeters = spreadMeters
+            estimate = if (estLat != null && estLon != null) {
+                SourceEstimateInfo(
+                    latitude = estLat,
+                    longitude = estLon,
+                    altitude = estAlt,
+                    floorOffset = floorOffset,
+                    method = method,
+                    contributingNodes = contributingNodes,
+                    spreadMeters = spreadMeters,
+                    timingResidualMs = timingResidualMs
+                )
+            } else {
+                null
+            }
         )
 
         scope.launch {
@@ -1457,6 +1550,7 @@ class MeshNetworkManager(context: Context) {
         }
 
         publishResponseTriggerToCloud(trigger, sourceEndpointId)
+        publishConsensus(pendingVoteSessions[sessionId], active = false)
         pendingVoteSessions.remove(sessionId)
         clearOrphanVotes(sessionId)
         Log.w(TAG, "RESPONSE_TRIGGER received: session=$sessionId at ($latitude, $longitude)")
@@ -1513,6 +1607,129 @@ class MeshNetworkManager(context: Context) {
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Clock synchronisation (NTP-style, over the mesh link)
+    //
+    // Triangulation compares arrival times across phones, and sound covers 0.343 m
+    // per millisecond — so without a shared time base the arrival differences are
+    // meaningless. Nearby gives us no common clock, so each node measures the offset
+    // to each peer directly: ping at t1, peer stamps receive t2 and reply t3, we
+    // stamp t4. Round-trip delay cancels out of the average, leaving
+    //   offset = ((t2 - t1) + (t3 - t4)) / 2      (peer clock minus our clock)
+    // with an uncertainty of about half the round trip. That is a few milliseconds
+    // on a good link and tens of milliseconds on a poor one; the solver is told the
+    // uncertainty and refuses to triangulate when it is too large to be worth it.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private data class ClockSample(
+        /** Peer clock minus local clock, in milliseconds. */
+        val offsetMs: Double,
+        val rttMs: Double,
+        val measuredAtMs: Long
+    ) {
+        /** Half the round trip: how far off the offset could plausibly be. */
+        val uncertaintyMs: Double get() = rttMs / 2.0
+    }
+
+    private fun startClockSync() {
+        if (clockSyncJob?.isActive == true) return
+        clockSyncJob = scope.launch {
+            while (true) {
+                if (connectedEndpoints.isNotEmpty()) {
+                    val pingId = createMessageId()
+                    sendPayloadToAllEndpoints("$PAYLOAD_TIME_PING|$pingId|$localEndpointName|${System.currentTimeMillis()}")
+                }
+                pruneClockSamples()
+                delay(CLOCK_SYNC_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun stopClockSync() {
+        clockSyncJob?.cancel()
+        clockSyncJob = null
+    }
+
+    private fun handleTimePing(sourceEndpointId: String, message: String) {
+        val receivedAtMs = System.currentTimeMillis()
+        val parts = message.split("|")
+        if (parts.size < 4) return
+        val pingId = parts[1]
+        val requesterNodeId = parts[2]
+        val sentAtMs = parts[3].toLongOrNull() ?: return
+
+        sendPayloadToEndpoint(
+            endpointId = sourceEndpointId,
+            message = "$PAYLOAD_TIME_PONG|$pingId|$localEndpointName|$requesterNodeId|" +
+                "$sentAtMs|$receivedAtMs|${System.currentTimeMillis()}",
+            reason = "clock-pong"
+        )
+    }
+
+    private fun handleTimePong(message: String) {
+        val receivedAtMs = System.currentTimeMillis()
+        val parts = message.split("|")
+        if (parts.size < 7) return
+        val responderNodeId = parts[2]
+        val requesterNodeId = parts[3]
+        if (requesterNodeId != localEndpointName) return // not our round trip
+
+        val t1 = parts[4].toLongOrNull() ?: return
+        val t2 = parts[5].toLongOrNull() ?: return
+        val t3 = parts[6].toLongOrNull() ?: return
+        val t4 = receivedAtMs
+
+        val rttMs = ((t4 - t1) - (t3 - t2)).toDouble()
+        if (rttMs < 0 || rttMs > MAX_CLOCK_RTT_MS) {
+            Log.d(TAG, "Discarding clock sample from $responderNodeId: rtt=${rttMs}ms")
+            return
+        }
+        val offsetMs = ((t2 - t1).toDouble() + (t3 - t4).toDouble()) / 2.0
+        val sample = ClockSample(offsetMs, rttMs, receivedAtMs)
+
+        // Keep the tightest recent measurement: a lower round trip means a lower
+        // bound on how wrong the offset can be.
+        val existing = peerClockOffsets[responderNodeId]
+        val existingStale = existing == null || receivedAtMs - existing.measuredAtMs > CLOCK_SAMPLE_TTL_MS
+        if (existingStale || rttMs < existing!!.rttMs) {
+            peerClockOffsets[responderNodeId] = sample
+            Log.d(TAG, "Clock sync $responderNodeId offset=${"%.1f".format(offsetMs)}ms rtt=${"%.1f".format(rttMs)}ms")
+        }
+    }
+
+    private fun pruneClockSamples() {
+        val cutoff = System.currentTimeMillis() - CLOCK_SAMPLE_TTL_MS
+        peerClockOffsets.entries.removeIf { it.value.measuredAtMs < cutoff }
+    }
+
+    /**
+     * Convert a peer's detection timestamp into our own clock, plus how well that
+     * conversion is known. Returns null when we have no fresh offset for that peer —
+     * an unsynchronised timestamp must never be fed to the solver as if it were good.
+     */
+    private fun toLocalClock(nodeId: String, remoteMs: Long): Pair<Long, Double>? {
+        if (remoteMs == Triangulation.NO_TIMING) return null
+        val sample = peerClockOffsets[nodeId] ?: return null
+        if (System.currentTimeMillis() - sample.measuredAtMs > CLOCK_SAMPLE_TTL_MS) return null
+        return (remoteMs - sample.offsetMs).roundToLong() to sample.uncertaintyMs
+    }
+
+    private fun publishConsensus(session: VoteSession?, active: Boolean) {
+        _consensusState.value = if (session == null) {
+            ConsensusSnapshot()
+        } else {
+            ConsensusSnapshot(
+                sessionId = session.sessionId,
+                active = active,
+                confirmations = session.confirmedCount(),
+                independentConfirmations = session.independentConfirmations(),
+                totalVotes = session.totalVotes(),
+                required = effectiveConfirmationThreshold(),
+                startedAtMs = session.startedAtMs
+            )
+        }
+    }
+
     private fun startVoteCleanup() {
         if (voteCleanupJob?.isActive == true) return
         voteCleanupJob = scope.launch {
@@ -1526,6 +1743,11 @@ class MeshNetworkManager(context: Context) {
                 expiredSessions.forEach { sessionId ->
                     pendingVoteSessions.remove(sessionId)
                     clearOrphanVotes(sessionId)
+                    if (_consensusState.value.sessionId == sessionId) {
+                        // The vote failed to reach quorum: stand down rather than
+                        // leaving a stale "pending" tally on screen.
+                        _consensusState.value = _consensusState.value.copy(active = false)
+                    }
                     Log.d(TAG, "Expired vote session: $sessionId")
                 }
 

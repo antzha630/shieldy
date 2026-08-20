@@ -33,15 +33,42 @@ If you are an AI agent picking up this repository:
 
 ### Current Mesh Payload Format
 
+State alerts:
+
 - Threat: `ALERT:THREAT_DETECTED|<messageId>|<zone>`
 - Evacuate: `ALERT:EVACUATE|<messageId>|<route>`
 - Clear: `ALERT:ALL_CLEAR|<messageId>`
+
+Consensus and localization (fields are append-only, so older peers still parse):
+
+- Raise: `WAKE:CLASSIFY|<sessionId>|<nodeId>|<lat>|<lon>|<sentAtMs>|<detectedAtMs>|<altitude>|<confidence>`
+- Vote: `VOTE:CLASSIFY|<sessionId>|<nodeId>|<0|1>|<confidence>|<sentAtMs>|<lat>|<lon>|<alt>|<detectedAtMs>`
+- Trigger: `RESPONSE:TRIGGER|<sessionId>|<lat>|<lon>|<nodes>|<ts>|<estLat>|<estLon>|<estAlt>|<floorOffset>|<method>|<spreadM>|<residualMs>|<contributingNodes>`
+- Sentinel: `SENTINEL:DISARM|<messageId>|<nodeId>`
+
+Clock sync (point-to-point; never relayed or deduped, since an offset is only
+meaningful for the link that measured it):
+
+- `TIME:PING|<pingId>|<nodeId>|<t1>`
+- `TIME:PONG|<pingId>|<responderId>|<requesterId>|<t1>|<t2>|<t3>`
+
+`detectedAtMs` is when that node's **microphone heard the impulse**, not when it sent
+the message; it is converted onto the receiver's clock using the measured offset. This
+is what makes arrival-time triangulation possible — see
+`docs/GUNSHOT_ACOUSTICS_INDOORS.md`.
 
 ### Known Constraints
 
 - Nearby on emulator is unreliable. Use **real Android devices** for mesh demos.
 - Detection is pretrained YAMNet class score gating, not yet custom fine-tuned school-specific classifier.
-- iOS parity requires backend relay architecture due to iOS background constraints.
+- Triangulation accuracy is bounded by phone clock sync, not by the solver: ~7 m of
+  ranging error per 20 ms of clock offset. Treat a fix as room-or-corridor level, not
+  the sub-metre figure a fixed wired sensor array achieves.
+- iOS joins through the relay bus (`/v1/mesh/*`) rather than Nearby, which is
+  Android-only. The web client at `/app` is a real voting sensor node, but its
+  detector is an impulsive-transient detector, not a trained classifier, and mobile
+  Safari suspends audio when the tab is backgrounded. See
+  `docs/OPIUS_CLIENT_AND_IOS.md`.
 
 ## Architecture
 
@@ -75,10 +102,25 @@ If you are an AI agent picking up this repository:
 ### Detection
 - Foreground microphone service for continuous monitoring
 - Activity-gated ML inference for battery-aware operation
-- Real-time debug telemetry in UI:
-  - Audio amplitude
-  - ML top label
-  - Gunshot confidence score
+- Impulse-aware gating: peak level, peak-to-RMS crest factor, and **microphone
+  clipping** (a close shot rails a phone mic; severe clipping also relaxes the ML
+  threshold, since the distortion it causes would otherwise lose a real detection)
+- 4-second retrospective audio buffer so a phone can classify the moment a *peer*
+  reports hearing something, not whatever it hears when the message arrives
+- Real-time telemetry in UI:
+  - Audio amplitude and activity gate
+  - ML top label and gunshot confidence score
+  - Microphone clipping percentage
+
+### Consensus and localization
+- **Anti-herding quorum**: confirmations required scale with fleet size, and the
+  raising node alone is never sufficient once peers exist
+- **Triangulation**: TDoA multilateration from arrival times over an NTP-style mesh
+  clock sync, falling back to a confidence-weighted centroid when the timing cannot
+  support an honest fix
+- **Within-building metrics**: relative floor offset from the altitude spread across
+  confirming phones
+- **First aid**: bystander guidance (bleeding first) in the app and the web client
 
 ### Alerting
 1. **LISTENING**: dark screen + active mesh indicator
@@ -144,6 +186,10 @@ app/src/main/java/com/echoshield/echonode/
 ├── service/
 │   ├── AudioSensorService.kt      # Foreground audio + detection loop
 │   └── GunshotClassifier.kt       # YAMNet TFLite wrapper
+├── core/
+│   ├── Triangulation.kt           # TDoA multilateration + centroid fallback
+│   ├── FirstAid.kt                # Bystander first-aid guidance
+│   └── contracts/EchoContracts.kt # Gateway interfaces + UI state
 ├── viewmodel/
 │   └── MainViewModel.kt           # App state transitions
 └── ui/

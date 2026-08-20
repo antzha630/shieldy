@@ -18,6 +18,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.echoshield.echonode.MainActivity
 import com.echoshield.echonode.R
+import com.echoshield.echonode.core.Triangulation
 import com.echoshield.echonode.data.MeshNetworkManager
 import com.echoshield.echonode.data.SystemEventFlow
 import com.echoshield.echonode.sensor.LocationProvider
@@ -108,6 +109,32 @@ class AudioSensorService : Service() {
         private const val MODEL_SAMPLE_RATE = 16000
         private const val MODEL_INPUT_SAMPLES = LegacyTfLiteGunshotClassifier.INPUT_SAMPLES
 
+        // ─────────────────────────────────────────────────────────────────────
+        // RETROSPECTIVE AUDIO HISTORY
+        //
+        // A gunshot is over in milliseconds, but a peer's WAKE_CLASSIFY takes time
+        // to cross the mesh. Classifying "the last second of audio" at the moment
+        // the request arrives can therefore miss the shot entirely and vote NO on a
+        // real event — which silently breaks consensus. Every node instead keeps
+        // several seconds of audio so it can look *back* to the moment it heard the
+        // impulse and classify that window.
+        // ─────────────────────────────────────────────────────────────────────
+        private const val HISTORY_SECONDS = 4
+        private const val HISTORY_SAMPLES = MODEL_SAMPLE_RATE * HISTORY_SECONDS
+
+        // How recently this node must have heard an impulse of its own for that to
+        // count as its arrival of the event a peer is asking about.
+        private const val IMPULSE_MEMORY_MS = 3000L
+
+        // Peak level that marks a frame as containing an impulsive onset worth
+        // timestamping for triangulation.
+        private const val IMPULSE_ONSET_PEAK_NORMALIZED = 0.15f
+
+        // Audio kept *after* the impulse onset in the classified window. Indoors the
+        // report arrives smeared into a reverberant tail, and YAMNet keys on that
+        // whole envelope, so the window is centred late rather than on the onset.
+        private const val WINDOW_TAIL_MS = 500L
+
         fun startService(context: Context) {
             val intent = Intent(context, AudioSensorService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -149,13 +176,22 @@ class AudioSensorService : Service() {
     private var dutyMonitorJob: Job? = null
     private var wakeRequestJob: Job? = null
     
-    // Wake capture state - when non-sentinel is woken, briefly capture audio for classification
-    private val wakeAudioBuffer = FloatArray(MODEL_INPUT_SAMPLES)
+    // Retrospective audio history, shared by the detection loop and by wake
+    // classification. Written by the capture loop, read by classification on another
+    // coroutine, so all access is under historyLock.
+    private val historyLock = Any()
+    private val historyBuffer = FloatArray(HISTORY_SAMPLES)
+    private var historyWriteIndex = 0
+    private var historySamplesWritten = 0L
+    private var historyEndTimeMs = 0L
+
+    /** Wall-clock time this node's microphone last heard an impulsive onset. */
     @Volatile
-    private var wakeBufferWriteIndex = 0
+    private var lastImpulseAtMs = 0L
+
+    /** Set once per wake request so a filling buffer cannot fire a burst of votes. */
     @Volatile
-    private var wakeBufferFilled = false
-    private var wakeCaptureSamplesNeeded = 0
+    private var wakeVoteDispatched = false
 
     override fun onCreate() {
         super.onCreate()
@@ -239,19 +275,20 @@ class AudioSensorService : Service() {
             return
         }
 
-        // If we're the sentinel, we already have audio - classify immediately
-        if (isSentinelActive && audioRecordingJob?.isActive == true) {
+        // Already listening: the shot is in our history buffer, so answer from it.
+        if (audioRecordingJob?.isActive == true && hasEnoughHistory()) {
             classifyAndVote(sessionId)
             return
         }
 
-        // Not sentinel - need to start temporary audio capture
+        // Not listening - start capture and vote as soon as we have a full window.
+        // This node cannot contribute an arrival time (it was not listening when the
+        // shot happened), so its vote counts toward consensus but not triangulation.
         isProcessingWakeRequest = true
+        wakeVoteDispatched = false
         pendingWakeSessionId = sessionId
-        wakeBufferWriteIndex = 0
-        wakeBufferFilled = false
-        wakeCaptureSamplesNeeded = MODEL_INPUT_SAMPLES
-        
+        resetHistory()
+
         Log.i(TAG, "Starting wake audio capture for session=$sessionId")
         // Ensure we have a position fix so this node's vote can contribute to
         // triangulation, even though non-sentinels normally keep location idle.
@@ -259,49 +296,80 @@ class AudioSensorService : Service() {
         startAudioRecording()
     }
 
+    /**
+     * Classify this node's *own* audio for a peer's detection session and vote.
+     *
+     * The window classified is the one ending at the moment this microphone last
+     * heard an impulsive onset (if that was recent enough to be the same event),
+     * not simply the latest audio — otherwise mesh latency would have us classifying
+     * the silence *after* the shot. That same onset time is reported as this node's
+     * arrival time, which is what makes TDoA triangulation possible.
+     */
     private fun classifyAndVote(sessionId: String) {
         serviceScope.launch(Dispatchers.IO) {
             try {
                 isProcessingWakeRequest = true
-                
+
                 val voterLocation = locationProvider?.currentLocation?.value
                 val voterLat = voterLocation?.latitude ?: Double.NaN
                 val voterLon = voterLocation?.longitude ?: Double.NaN
                 val voterAlt = voterLocation?.altitude ?: Double.NaN
 
+                val now = System.currentTimeMillis()
+                val impulseAt = lastImpulseAtMs
+                val heardImpulse = impulseAt > 0L && now - impulseAt <= IMPULSE_MEMORY_MS
+                // Give the model the tail of the impulse, not just its leading edge.
+                val windowEnd = if (heardImpulse) impulseAt + WINDOW_TAIL_MS else now
+                val arrivalAtMs = if (heardImpulse) impulseAt else Triangulation.NO_TIMING
+
                 if (!legacyTfReady) {
                     Log.w(TAG, "No classifier ready for wake vote, voting NO for $sessionId")
-                    meshNetworkManager.submitClassifyVote(sessionId, false, 0f, voterLat, voterLon, voterAlt)
+                    meshNetworkManager.submitClassifyVote(
+                        sessionId, false, 0f, voterLat, voterLon, voterAlt, Triangulation.NO_TIMING
+                    )
                     return@launch
                 }
-                
-                // Use wake buffer if we captured fresh audio, otherwise use rolling buffer
-                val modelInput = if (wakeBufferFilled) {
-                    snapshotWakeBuffer()
-                } else {
-                    // Fallback - shouldn't happen often
-                    Log.w(TAG, "Wake buffer not filled, using empty classification")
-                    FloatArray(MODEL_INPUT_SAMPLES)
+
+                val modelInput = snapshotHistoryAt(windowEnd)
+                if (modelInput == null) {
+                    Log.w(TAG, "No audio history yet for $sessionId, voting NO")
+                    meshNetworkManager.submitClassifyVote(
+                        sessionId, false, 0f, voterLat, voterLon, voterAlt, Triangulation.NO_TIMING
+                    )
+                    return@launch
                 }
-                
+
                 val result = classifyTfLite(modelInput)
 
                 if (result != null) {
                     val isGunshot = result.gunshotConfidence >= GUNSHOT_CONFIDENCE_THRESHOLD
                     Log.i(
                         TAG,
-                        "Wake classify result: gunshot=$isGunshot score=${result.gunshotConfidence} top=${result.topLabel}"
+                        "Wake classify result: gunshot=$isGunshot score=${result.gunshotConfidence} " +
+                            "top=${result.topLabel} windowEnd=${now - windowEnd}ms ago heardImpulse=$heardImpulse"
                     )
-                    meshNetworkManager.submitClassifyVote(sessionId, isGunshot, result.gunshotConfidence, voterLat, voterLon, voterAlt)
+                    meshNetworkManager.submitClassifyVote(
+                        sessionId = sessionId,
+                        isGunshot = isGunshot,
+                        confidence = result.gunshotConfidence,
+                        latitude = voterLat,
+                        longitude = voterLon,
+                        altitude = voterAlt,
+                        // Only claim an arrival time when we actually heard something;
+                        // a guessed timestamp would corrupt the triangulation.
+                        detectedAtMs = if (isGunshot) arrivalAtMs else Triangulation.NO_TIMING
+                    )
                     SystemEventFlow.updateModelInference(result.gunshotConfidence, result.topLabel)
                 } else {
                     Log.w(TAG, "Classifier returned null for $sessionId")
-                    meshNetworkManager.submitClassifyVote(sessionId, false, 0f, voterLat, voterLon, voterAlt)
+                    meshNetworkManager.submitClassifyVote(
+                        sessionId, false, 0f, voterLat, voterLon, voterAlt, Triangulation.NO_TIMING
+                    )
                 }
             } finally {
                 isProcessingWakeRequest = false
                 pendingWakeSessionId = null
-                
+
                 // If not sentinel, stop audio capture after classification
                 if (!isSentinelActive) {
                     serviceScope.launch(Dispatchers.Main) {
@@ -311,14 +379,6 @@ class AudioSensorService : Service() {
                 }
             }
         }
-    }
-
-    private fun snapshotWakeBuffer(): FloatArray {
-        val output = FloatArray(MODEL_INPUT_SAMPLES)
-        val tailSize = wakeAudioBuffer.size - wakeBufferWriteIndex
-        System.arraycopy(wakeAudioBuffer, wakeBufferWriteIndex, output, 0, tailSize)
-        System.arraycopy(wakeAudioBuffer, 0, output, tailSize, wakeBufferWriteIndex)
-        return output
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -455,9 +515,6 @@ class AudioSensorService : Service() {
 
     private suspend fun processAudioStream(bufferSize: Int) {
         val buffer = ShortArray(bufferSize)
-        val rollingModelSamples = FloatArray(MODEL_INPUT_SAMPLES)
-        var rollingWriteIndex = 0
-        var rollingBufferFilled = false
         var lastAmplitudeUpdate = 0L
         var lastModelInference = 0L
 
@@ -470,73 +527,46 @@ class AudioSensorService : Service() {
 
             if (readResult > 0) {
                 val currentTime = System.currentTimeMillis()
-                
-                // MODE 1: Wake capture mode (non-sentinel responding to WAKE_CLASSIFY)
-                if (isProcessingWakeRequest && !isSentinelActive) {
-                    appendToRollingBuffer(
-                        source = buffer,
-                        size = readResult,
-                        destination = wakeAudioBuffer,
-                        writeIndex = wakeBufferWriteIndex
-                    ).also { (newIndex, didWrap) ->
-                        wakeBufferWriteIndex = newIndex
-                        if (didWrap) {
-                            wakeBufferFilled = true
-                        }
-                    }
-
-                    // Check if we have enough samples to classify
-                    if (wakeBufferFilled) {
-                        val sessionId = pendingWakeSessionId
-                        if (sessionId != null) {
-                            Log.i(TAG, "Wake buffer filled, classifying for session=$sessionId")
-                            classifyAndVote(sessionId)
-                        }
-                    }
-                    continue
-                }
-
-                // MODE 2: Sentinel mode - full detection pipeline
-                if (!isSentinelActive) {
-                    // Not sentinel and not processing wake request - shouldn't be recording
-                    continue
-                }
 
                 val instantRms = calculateRMS(buffer, readResult)
-                val peakAmplitude = calculateMaxAmplitude(buffer, readResult)
+                val peakIndex = indexOfMaxAmplitude(buffer, readResult)
+                val peakAmplitude = abs(buffer[peakIndex].toInt())
                 val peakNormalized = peakAmplitude / 32768f
                 val clipFraction = calculateClipFraction(buffer, readResult)
                 val clippingGate = clipFraction >= CLIP_FRACTION_GATE
                 val clippingSevere = clipFraction >= CLIP_FRACTION_SEVERE
-                
-                // TIER 1: Apply EMA smoothing for stable gate decisions
-                smoothedAmplitude = EMA_ALPHA * instantRms + (1 - EMA_ALPHA) * smoothedAmplitude
-                
-                // Append to rolling buffer for ML input
-                appendToRollingBuffer(
-                    source = buffer,
-                    size = readResult,
-                    destination = rollingModelSamples,
-                    writeIndex = rollingWriteIndex
-                ).also { (newIndex, didWrap) ->
-                    rollingWriteIndex = newIndex
-                    if (didWrap) {
-                        rollingBufferFilled = true
-                    }
+
+                // Every frame goes into the shared history, whether or not this node
+                // is the sentinel, so a peer's wake request can be answered from the
+                // audio at the moment of the shot.
+                appendHistory(buffer, readResult, currentTime)
+
+                // Timestamp the impulse itself, to sample accuracy within the frame:
+                // sound covers 0.343 m per millisecond, so this is what triangulation
+                // resolution ultimately rests on.
+                if (peakNormalized >= IMPULSE_ONSET_PEAK_NORMALIZED || clippingGate) {
+                    val frameStartMs = currentTime - (readResult * 1000L / SAMPLE_RATE)
+                    lastImpulseAtMs = frameStartMs + (peakIndex * 1000L / SAMPLE_RATE)
                 }
 
-                // Also fill wake buffer in case we need to vote on our own detection
-                appendToRollingBuffer(
-                    source = buffer,
-                    size = readResult,
-                    destination = wakeAudioBuffer,
-                    writeIndex = wakeBufferWriteIndex
-                ).also { (newIndex, didWrap) ->
-                    wakeBufferWriteIndex = newIndex
-                    if (didWrap) {
-                        wakeBufferFilled = true
+                // A woken non-sentinel votes as soon as it has a full window, once.
+                if (isProcessingWakeRequest && !isSentinelActive) {
+                    val sessionId = pendingWakeSessionId
+                    if (!wakeVoteDispatched && sessionId != null && hasEnoughHistory()) {
+                        wakeVoteDispatched = true
+                        Log.i(TAG, "Wake capture window filled, classifying for session=$sessionId")
+                        classifyAndVote(sessionId)
                     }
+                    continue
                 }
+
+                if (!isSentinelActive) {
+                    // Not sentinel and not processing a wake request: history only.
+                    continue
+                }
+
+                // TIER 1: Apply EMA smoothing for stable gate decisions
+                smoothedAmplitude = EMA_ALPHA * instantRms + (1 - EMA_ALPHA) * smoothedAmplitude
 
                 val cooldownRemaining = maxOf(0L, TRIGGER_COOLDOWN_MS - (currentTime - lastTriggerTime))
                 
@@ -560,7 +590,7 @@ class AudioSensorService : Service() {
 
                 // Open gate if ANY of the criteria are met (more sensitive).
                 // Mic clipping is itself a strong impulsive cue for a nearby gunshot.
-                val gateOpen = (rmsGateOpen || peakGateOpen || impulsiveSound || clippingGate) && rollingBufferFilled
+                val gateOpen = (rmsGateOpen || peakGateOpen || impulsiveSound || clippingGate) && hasEnoughHistory()
                 
                 // Update gate state telemetry if changed
                 if (gateOpen != currentGateOpen) {
@@ -587,9 +617,9 @@ class AudioSensorService : Service() {
 
                 if (shouldRunModel) {
                     lastModelInference = currentTime
-                    val modelInput = snapshotModelInput(rollingModelSamples, rollingWriteIndex)
-                    val result = classifyTfLite(modelInput)
-                    
+                    val modelInput = snapshotHistoryAt(currentTime)
+                    val result = if (modelInput == null) null else classifyTfLite(modelInput)
+
                     if (result != null) {
                         // Log every inference for debugging detection issues.
                         // When the mic is severely clipped the ML input waveform is
@@ -630,7 +660,8 @@ class AudioSensorService : Service() {
                             val location = locationProvider?.currentLocation?.value
                             val lat = location?.latitude ?: 0.0
                             val lon = location?.longitude ?: 0.0
-                            
+                            val alt = location?.altitude ?: Double.NaN
+
                             val connectedPeers = meshNetworkManager.getConnectedPeerIds().size
                             // Only handoff sentinel duty when peers are available. On a solo
                             // device, disarming creates a long idle period during testing.
@@ -639,11 +670,29 @@ class AudioSensorService : Service() {
                             } else {
                                 Log.i(TAG, "Threat detected with no peers; keeping local sentinel active")
                             }
-                            meshNetworkManager.broadcastWakeClassify(lat, lon)
-                            
+
+                            // Report when *this* microphone heard the impulse, and our
+                            // real classifier score rather than a blanket 1.0 — the node
+                            // that fires first is the one most likely to be wrong, so it
+                            // must not dominate the triangulated fix.
+                            val impulseAt = lastImpulseAtMs
+                            val arrivalAtMs = if (impulseAt > 0L && currentTime - impulseAt <= IMPULSE_MEMORY_MS) {
+                                impulseAt
+                            } else {
+                                currentTime
+                            }
+                            meshNetworkManager.broadcastWakeClassify(
+                                latitude = lat,
+                                longitude = lon,
+                                confidence = result.gunshotConfidence,
+                                altitude = alt,
+                                detectedAtMs = arrivalAtMs
+                            )
+
                             Log.i(
                                 TAG,
-                                "WAKE_CLASSIFY broadcast at ($lat, $lon), peers=$connectedPeers"
+                                "WAKE_CLASSIFY broadcast at ($lat, $lon), peers=$connectedPeers " +
+                                    "conf=${result.gunshotConfidence} arrival=${currentTime - arrivalAtMs}ms ago"
                             )
                             
                             // Note: Audio recording will stop when duty assignment updates
@@ -687,46 +736,97 @@ class AudioSensorService : Service() {
         return clipped.toFloat() / readSize.toFloat()
     }
 
-    private fun calculateMaxAmplitude(buffer: ShortArray, readSize: Int): Int {
-        var maxAmplitude = 0
+    /** Index of the loudest sample in the frame — the impulse onset, to sample accuracy. */
+    private fun indexOfMaxAmplitude(buffer: ShortArray, readSize: Int): Int {
+        var maxAmplitude = -1
+        var maxIndex = 0
         for (i in 0 until readSize) {
             val amplitude = abs(buffer[i].toInt())
             if (amplitude > maxAmplitude) {
                 maxAmplitude = amplitude
+                maxIndex = i
             }
         }
-        return maxAmplitude
+        return maxIndex
     }
 
-    private fun appendToRollingBuffer(
-        source: ShortArray,
-        size: Int,
-        destination: FloatArray,
-        writeIndex: Int
-    ): Pair<Int, Boolean> {
-        var index = writeIndex
-        var wrapped = false
-        val ratio = SAMPLE_RATE.toFloat() / MODEL_SAMPLE_RATE.toFloat()
-        var sourcePos = 0f
-        while (sourcePos < size) {
-            val sourceIndex = sourcePos.toInt().coerceIn(0, size - 1)
-            destination[index] = source[sourceIndex] / 32768f
-            index++
-            if (index >= destination.size) {
-                index = 0
-                wrapped = true
+    /**
+     * Resample a 44.1 kHz frame down to the model's 16 kHz and append it to the
+     * history ring, stamping the frame's end time so windows can later be addressed
+     * by wall-clock instead of by position.
+     *
+     * Each output sample is the mean of the input samples it spans rather than a
+     * single picked sample: without that box filter, everything above 8 kHz aliases
+     * back down into the band, and a gunshot is exactly the broadband impulse that
+     * suffers most from it.
+     */
+    private fun appendHistory(source: ShortArray, size: Int, frameEndTimeMs: Long) {
+        val ratio = SAMPLE_RATE.toDouble() / MODEL_SAMPLE_RATE.toDouble()
+        synchronized(historyLock) {
+            var index = historyWriteIndex
+            var written = 0L
+            var sourcePos = 0.0
+            while (sourcePos < size) {
+                val start = sourcePos.toInt()
+                val end = ((sourcePos + ratio).toInt()).coerceAtMost(size)
+                var sum = 0f
+                var count = 0
+                for (i in start until end) {
+                    sum += source[i] / 32768f
+                    count++
+                }
+                historyBuffer[index] = if (count > 0) sum / count else 0f
+                index++
+                if (index >= historyBuffer.size) index = 0
+                written++
+                sourcePos += ratio
             }
-            sourcePos += ratio
+            historyWriteIndex = index
+            historySamplesWritten += written
+            historyEndTimeMs = frameEndTimeMs
         }
-        return index to wrapped
     }
 
-    private fun snapshotModelInput(ringBuffer: FloatArray, writeIndex: Int): FloatArray {
-        val output = FloatArray(MODEL_INPUT_SAMPLES)
-        val tailSize = ringBuffer.size - writeIndex
-        System.arraycopy(ringBuffer, writeIndex, output, 0, tailSize)
-        System.arraycopy(ringBuffer, 0, output, tailSize, writeIndex)
-        return output
+    private fun hasEnoughHistory(): Boolean = synchronized(historyLock) {
+        historySamplesWritten >= MODEL_INPUT_SAMPLES
+    }
+
+    private fun resetHistory() {
+        synchronized(historyLock) {
+            historyWriteIndex = 0
+            historySamplesWritten = 0L
+            historyEndTimeMs = 0L
+        }
+        lastImpulseAtMs = 0L
+    }
+
+    /**
+     * A model-sized window of history ending at [endTimeMs] (wall clock). Older
+     * requests are clamped to the oldest audio still retained, future ones to the
+     * newest. Returns null until a full window has been captured.
+     */
+    private fun snapshotHistoryAt(endTimeMs: Long): FloatArray? {
+        synchronized(historyLock) {
+            if (historySamplesWritten < MODEL_INPUT_SAMPLES) return null
+
+            val msBehind = (historyEndTimeMs - endTimeMs).coerceAtLeast(0L)
+            val oldestOffset = minOf(
+                historySamplesWritten - MODEL_INPUT_SAMPLES,
+                (HISTORY_SAMPLES - MODEL_INPUT_SAMPLES).toLong()
+            )
+            val samplesBehind = (msBehind * MODEL_SAMPLE_RATE / 1000L).coerceIn(0L, oldestOffset)
+
+            val end = Math.floorMod(historyWriteIndex - samplesBehind.toInt(), HISTORY_SAMPLES)
+            val start = Math.floorMod(end - MODEL_INPUT_SAMPLES, HISTORY_SAMPLES)
+
+            val output = FloatArray(MODEL_INPUT_SAMPLES)
+            val firstChunk = minOf(MODEL_INPUT_SAMPLES, HISTORY_SAMPLES - start)
+            System.arraycopy(historyBuffer, start, output, 0, firstChunk)
+            if (firstChunk < MODEL_INPUT_SAMPLES) {
+                System.arraycopy(historyBuffer, 0, output, firstChunk, MODEL_INPUT_SAMPLES - firstChunk)
+            }
+            return output
+        }
     }
 
     private data class ClassificationResult(
@@ -766,10 +866,8 @@ class AudioSensorService : Service() {
         consecutiveHighConfidence = 0
         currentGateOpen = false
         
-        // Reset wake buffer state
-        wakeBufferWriteIndex = 0
-        wakeBufferFilled = false
-        wakeCaptureSamplesNeeded = 0
+        resetHistory()
+        wakeVoteDispatched = false
         
         SystemEventFlow.updateAmplitude(0.0)
         SystemEventFlow.updateSmoothedAmplitude(0.0)

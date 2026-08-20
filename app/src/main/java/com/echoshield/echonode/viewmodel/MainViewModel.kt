@@ -9,7 +9,10 @@ import com.echoshield.echonode.core.contracts.EchoUiState
 import com.echoshield.echonode.core.contracts.MeshStatus
 import com.echoshield.echonode.core.contracts.SafetyStatus
 import com.echoshield.echonode.core.contracts.ThreatZone
+import com.echoshield.echonode.core.contracts.ConsensusSnapshot
 import com.echoshield.echonode.core.contracts.ConversationMessage
+import com.echoshield.echonode.core.contracts.FirstAidStep
+import com.echoshield.echonode.core.contracts.SourceEstimateInfo
 import com.echoshield.echonode.experience.EchoOrchestrator
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -60,7 +63,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val serverPoliceBrief: String = "",
         val serverMedicalBrief: String = "",
         val liveUpdates: List<String> = emptyList(),
-        val conversationMessages: List<ConversationMessage> = emptyList()
+        val conversationMessages: List<ConversationMessage> = emptyList(),
+        // Microphone saturation: a nearby gunshot pins the mic to its rails.
+        val clippingDetected: Boolean = false,
+        val clipFraction: Float = 0f,
+        // Anti-herding vote in progress, and where the confirmed shot came from.
+        val consensus: ConsensusSnapshot = ConsensusSnapshot(),
+        val sourceEstimate: SourceEstimateInfo? = null,
+        val sentinelActive: Boolean = false,
+        val firstAidSteps: List<FirstAidStep> = emptyList()
     )
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
@@ -188,7 +199,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             serverPoliceBrief = source.serverPoliceBrief,
             serverMedicalBrief = source.serverMedicalBrief,
             liveUpdates = source.liveUpdates,
-            conversationMessages = source.conversationMessages
+            conversationMessages = source.conversationMessages,
+            clippingDetected = source.detectionTelemetry.clippingDetected,
+            clipFraction = source.detectionTelemetry.clipFraction,
+            consensus = source.consensus,
+            sourceEstimate = source.sourceEstimate,
+            sentinelActive = source.sentinelActive,
+            firstAidSteps = source.firstAidSteps
         )
     }
 }

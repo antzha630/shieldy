@@ -26,6 +26,41 @@ Auth note: write endpoints honor `ECHOSHIELD_RELAY_API_KEY` when set. For a publ
 client you would front these with a lightweight per-user token rather than the shared
 relay key; the demo leaves them open when no key is configured.
 
+## The web client as a sensor node (built)
+
+The Opius client is not only a viewer. With **listening mode** on, the page joins the
+mesh bus as a voting sensor, which is what makes an iPhone a participant in detection
+rather than a spectator:
+
+| Step | Mechanism |
+| --- | --- |
+| Join the bus | `EventSource` on `GET /v1/mesh/stream`; the relay returns a per-device `busToken` in its `hello` frame |
+| Share a clock | five round trips against `GET /v1/time`, keeping the lowest-latency sample (offset, plus `rtt / 2` as its uncertainty) |
+| Listen | `getUserMedia` → `ScriptProcessorNode` (1024 frames), with echo cancellation, noise suppression and AGC **off** so impulses are not flattened |
+| Detect | peak level, crest factor (peak/RMS), rise over a running background level, and sample clipping |
+| Timestamp | the loudest sample's index inside the buffer, converted to the server clock |
+| Raise | `POST /v1/mesh/detections` (rate-limited to one per 6 s) |
+| Vote | on `wake_classify`, reports whether *this* phone heard an impulse in the last 3 s, with position, altitude and arrival time |
+| Respond | `response_trigger` / `location_refined` surface immediately instead of waiting for the 5 s poll |
+
+**Honest limits — stated in the UI as well as here.**
+
+- This is an **impulsive-transient detector, not a trained gunshot classifier.** It has
+  no equivalent of the Android node's YAMNet head. It is built to *corroborate* what
+  other phones report; a fleet of only web nodes would be markedly more false-positive
+  prone than one with Android sensors in it. The anti-herding quorum is what keeps that
+  safe: a single web node can never trigger a response on its own.
+- **Timing is coarser than Android's.** The clock offset is known to about `rtt / 2`
+  against the relay, plus half a buffer (~12 ms at 44.1 kHz). At 0.343 m/ms that is
+  several metres of ranging error, and the server refuses to triangulate at all when
+  the uncertainty exceeds 60 ms.
+- **Listening mode is explicit and user-visible**, never silent. That is both the
+  honest design and the only pattern Apple permits. The status pill reads "Alerts on"
+  rather than "Listening" until the microphone is actually running.
+- **Backgrounding.** Mobile Safari suspends `AudioContext` when the tab is
+  backgrounded, so a web node listens while the page is open and in front. Continuous
+  background listening is what the native target below is for.
+
 ## Native iOS listening mode (design, not yet built)
 
 A true native iOS sensor node (background gunshot listening, like the Android

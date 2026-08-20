@@ -1,6 +1,7 @@
 package com.echoshield.echonode.experience
 
 import android.util.Log
+import com.echoshield.echonode.core.FirstAid
 import com.echoshield.echonode.core.contracts.AppState
 import com.echoshield.echonode.core.contracts.CloudGateway
 import com.echoshield.echonode.core.contracts.EchoUiState
@@ -92,8 +93,14 @@ class EchoOrchestrator(
         }
 
         scope.launch {
-            meshGateway.sentinelDutyActive.collect { _ ->
-                // Could update UI to show sentinel status if desired
+            meshGateway.sentinelDutyActive.collect { active ->
+                _uiState.value = _uiState.value.copy(sentinelActive = active)
+            }
+        }
+
+        scope.launch {
+            meshGateway.consensusState.collect { consensus ->
+                _uiState.value = _uiState.value.copy(consensus = consensus)
             }
         }
 
@@ -166,7 +173,8 @@ class EchoOrchestrator(
                 appState = if (shouldShowBarricadeSplash) AppState.BARRICADE else AppState.INCIDENT_REPORT,
                 threatZone = "Threat confirmed by ${incident.confirmedByCount.coerceAtLeast(1)} devices",
                 evacuationRoute = DEFAULT_EVACUATION_ROUTE,
-                relativeLocation = incident.recommendedAction
+                relativeLocation = incident.recommendedAction,
+                firstAidSteps = FirstAid.steps(threatActive = true)
             )
         }
     }
@@ -177,22 +185,27 @@ class EchoOrchestrator(
             barricadeSplashShownForSessionId = trigger.sessionId
         }
         lastThreatSessionId = trigger.sessionId
-        lastThreatLatitude = trigger.latitude
-        lastThreatLongitude = trigger.longitude
+        // Everything downstream — distance, bearing, escape route, the map — keys off
+        // the *triangulated* source when we have one, not the position of whichever
+        // phone happened to fire first.
+        val sourceLat = trigger.sourceLatitude
+        val sourceLon = trigger.sourceLongitude
+        lastThreatLatitude = sourceLat
+        lastThreatLongitude = sourceLon
 
         val myLat = _uiState.value.locationLatitude
         val myLon = _uiState.value.locationLongitude
 
         val distanceMeters = calculateDistanceMeters(
-            lat1 = trigger.latitude,
-            lon1 = trigger.longitude,
+            lat1 = sourceLat,
+            lon1 = sourceLon,
             lat2 = myLat,
             lon2 = myLon
         )
 
         val bearing = calculateBearing(
-            lat1 = trigger.latitude,
-            lon1 = trigger.longitude,
+            lat1 = sourceLat,
+            lon1 = sourceLon,
             lat2 = myLat,
             lon2 = myLon
         )
@@ -202,11 +215,24 @@ class EchoOrchestrator(
         val evacuationRoute = generateEvacuationRoute(distanceMeters, escapeDirection)
         val relativeMessage = generateDistanceBasedMessage(distanceMeters, directionFromThreat, evacuationRoute)
 
+        val estimate = trigger.estimate
         val threatZone = buildString {
             append("Threat confirmed by ${trigger.confirmedByNodes.size} devices")
             if (distanceMeters > 0) {
                 append(" - ${distanceMeters.roundToInt()}m $directionFromThreat")
             }
+            // Vertical position matters as much as horizontal inside a building.
+            if (estimate != null && estimate.floorOffset != 0) {
+                append(" - ~${estimate.floorOffset} floor(s) up")
+            }
+        }
+
+        // A triangulated fix earns a tight radius; a centroid of scattered phones has
+        // to own its uncertainty, so the circle grows to cover the cluster.
+        val radiusMeters = if (estimate != null && estimate.isTriangulated) {
+            (25.0 + estimate.spreadMeters * 0.25).coerceIn(20.0, 120.0)
+        } else {
+            (50.0 + trigger.confirmedByNodes.size * 20.0).coerceAtMost(250.0)
         }
 
         _uiState.value = _uiState.value.copy(
@@ -215,23 +241,27 @@ class EchoOrchestrator(
             threatZone = threatZone,
             evacuationRoute = evacuationRoute,
             relativeLocation = relativeMessage,
-            threatLatitude = trigger.latitude,
-            threatLongitude = trigger.longitude,
+            threatLatitude = sourceLat,
+            threatLongitude = sourceLon,
+            sourceEstimate = estimate,
+            firstAidSteps = FirstAid.steps(threatActive = true),
             threatZones = listOf(
                 ThreatZone(
-                    latitude = trigger.latitude,
-                    longitude = trigger.longitude,
-                    radiusMeters = (50.0 + trigger.confirmedByNodes.size * 20.0).coerceAtMost(250.0),
+                    latitude = sourceLat,
+                    longitude = sourceLon,
+                    radiusMeters = radiusMeters,
                     confidence = 0.9f,
                     source = "mesh-response"
                 )
             ),
-            threatRadiusMeters = (50.0 + trigger.confirmedByNodes.size * 20.0).coerceAtMost(250.0)
+            threatRadiusMeters = radiusMeters
         )
         Log.w(
             TAG,
             "Response trigger session=${trigger.sessionId} confirmed=${trigger.confirmedByNodes.size} " +
-                "showBarricade=$shouldShowBarricadeSplash appState=${_uiState.value.appState}"
+                "showBarricade=$shouldShowBarricadeSplash appState=${_uiState.value.appState} " +
+                "method=${estimate?.method ?: "none"} floor=${estimate?.floorOffset ?: 0} " +
+                "spread=${estimate?.spreadMeters?.roundToInt() ?: 0}m"
         )
     }
 
@@ -407,7 +437,8 @@ class EchoOrchestrator(
 
         _uiState.value = _uiState.value.copy(
             appState = AppState.EVACUATE,
-            evacuationRoute = selectedRoute
+            evacuationRoute = selectedRoute,
+            firstAidSteps = FirstAid.steps(threatActive = true)
         )
         if (broadcastToPeers) {
             meshGateway.broadcastEvacuate(selectedRoute)
@@ -435,7 +466,9 @@ class EchoOrchestrator(
             companionsCount = 0,
             injuredCount = 0,
             roomNumber = "",
-            incidentNotes = ""
+            incidentNotes = "",
+            sourceEstimate = null,
+            firstAidSteps = emptyList()
         )
         if (broadcastToPeers) {
             meshGateway.broadcastAllClear()
@@ -543,20 +576,28 @@ class EchoOrchestrator(
         when {
             payload.startsWith("ALERT:THREAT_DETECTED") -> transitionToIncidentFlow()
             payload.startsWith("ALERT:ALL_CLEAR") -> {
-                _uiState.value = _uiState.value.copy(appState = AppState.LISTENING)
+                _uiState.value = _uiState.value.copy(
+                    appState = AppState.LISTENING,
+                    sourceEstimate = null,
+                    firstAidSteps = emptyList()
+                )
             }
             payload.startsWith("ALERT:EVACUATE") -> {
                 val route = payload.split("|").getOrNull(2) ?: DEFAULT_EVACUATION_ROUTE
                 _uiState.value = _uiState.value.copy(
                     appState = AppState.EVACUATE,
-                    evacuationRoute = route
+                    evacuationRoute = route,
+                    firstAidSteps = FirstAid.steps(threatActive = true)
                 )
             }
         }
     }
 
     private fun transitionToBarricade() {
-        _uiState.value = _uiState.value.copy(appState = AppState.BARRICADE)
+        _uiState.value = _uiState.value.copy(
+            appState = AppState.BARRICADE,
+            firstAidSteps = FirstAid.steps(threatActive = true)
+        )
     }
 
     private fun transitionToIncidentFlow() {

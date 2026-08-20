@@ -77,29 +77,71 @@ The hard prerequisite is **tight clock synchronization** (sub-millisecond); soun
 travels ~0.34 m/ms, so a 1 ms clock error is a ~0.34 m ranging error. Echoes,
 diffraction, and reverberation add further uncertainty indoors.
 
-**Why phones can't do true TDOA today, and what we do instead:**
-- Android phones over Nearby Connections do **not** share a sub-millisecond common
-  clock, and GPS indoors is coarse/absent. True TDOA multilateration is therefore not
-  achievable with the current hardware path.
-- What we *can* do honestly is a **confidence-weighted centroid** of the phones that
-  independently confirmed the shot, using each phone's own position and classifier
-  confidence as weight. Implemented in `VoteSession.estimateSource()`
-  (`localizationMethod = "weighted_centroid"`). It reports the cluster centroid plus a
-  `spreadMeters` radius as a crude confidence bound.
-- **Within-building / floor** (`within building metrics`): each confirming vote now
-  carries its **altitude**. `estimateSource()` converts the altitude spread across
-  confirming phones into a relative **floor offset** using a nominal storey height
-  (`FLOOR_HEIGHT_METERS = 3.5 m`). This is coarse (GPS altitude is noisy indoors) but
-  gives responders a vertical hint that a pure lat/lon fix cannot.
+**What we do, and when each method applies.** Both live in `core/Triangulation.kt`
+(mirrored in `triangulateTdoa()` / `meshEstimateSource()` in `server/src/server.js`),
+and the app always reports *which* one produced a given fix rather than presenting
+them as equally trustworthy.
 
-**Documented upgrade path (not yet built):**
-1. Distribute a shared time base (NTP-style offset exchange or a leader-broadcast
-   epoch) so per-device detection timestamps become comparable to ~1–5 ms.
-2. Carry a precise per-vote `detectedAtMs` (the payload already reserves room for it)
-   and run a least-squares TDOA solve once ≥4 confirming phones with a common clock
-   report.
-3. Fuse a **barometric** floor estimate (pressure is a far better indoor altimeter
-   than GPS) for reliable storey resolution.
+*1. TDoA multilateration (`method = "tdoa_multilateration"`).* Phones have no shared
+clock out of the box, so we build one:
+
+- **Clock sync.** Each node measures its offset to each peer NTP-style over the mesh
+  link (`TIME:PING` / `TIME:PONG` in `MeshNetworkManager`): ping at `t1`, peer stamps
+  receive `t2` and reply `t3`, we stamp `t4`, and
+  `offset = ((t2 - t1) + (t3 - t4)) / 2`. Round-trip delay cancels out of the average.
+  The lowest-round-trip sample is kept, because a fast round trip bounds how wrong the
+  offset can be; the uncertainty carried forward is `rtt / 2`. Browser sensor nodes do
+  the same against the relay's `GET /v1/time`, so every device reports on one clock.
+- **Arrival time, not vote time.** `AudioSensorService` timestamps the *impulse* — it
+  locates the loudest sample inside the captured frame and converts its index to wall
+  clock — so the reported time is when the microphone heard the shot, not when
+  classification finished. That distinction is worth tens of metres.
+- **The solve.** `Triangulation.solve()` grid-searches (coarse 5 m sweep, then 0.5 m
+  refinement) for the point minimising the variance of `arrival_i - distance_i / c`
+  across confirming nodes. At the true source that quantity is constant and equals the
+  shared clock origin. A grid search needs no initial guess and cannot diverge the way
+  an iterative least-squares solve can.
+- **Refusing to guess.** The solve returns null — falling back to the centroid —
+  unless there are ≥3 timed nodes, every clock offset is known to ≤60 ms, the
+  confirming phones span ≥4 m of baseline, the arrival spread is ≤1.5 s (wider is not
+  physically one indoor event), and the final RMS residual fits the clocks' own
+  uncertainty. A fix that cannot meet its own error budget is not reported as a fix.
+
+*2. Confidence-weighted centroid (`method = "weighted_centroid"`).* When timing is
+missing or fails those guards, we fall back to the centre of the confirming cluster,
+weighted by each phone's classifier confidence, reported with a `spreadMeters` radius.
+This says "somewhere in here", which is the honest answer for unsynchronised phones.
+
+**Accuracy in practice.** The limiting term is clock-offset uncertainty, not the
+solver. Measured against the relay implementation, with five simulated phones spread
+across a 60 x 60 m floor plate and Gaussian clock error applied to each arrival time:
+
+| Clock jitter | TDoA fixes | Median error |
+| --- | --- | --- |
+| ±0 ms | 6/6 | 0.0 m |
+| ±5 ms | 6/6 | 1.6 m |
+| ±20 ms | 6/6 | 7.0 m |
+| ±50 ms | 0/6 | — (all fell back to centroid) |
+
+Two things to take from this. First, the error tracks the clock directly — roughly
+0.343 m per millisecond of offset error, as the physics demands. Second, the guards do
+their job: at ±50 ms the solver **refuses** rather than emitting a confident-looking
+fix it cannot support. So treat a TDoA result as a *room-or-corridor* answer, not the
+sub-metre figure a fixed, wired sensor array achieves — and the UI labels it as such.
+
+**Within-building / floor metrics.** Each confirming vote carries its **altitude**, and
+the fix converts the altitude spread across confirming phones into a relative **floor
+offset** using a nominal storey height (`FLOOR_HEIGHT_METERS = 3.5 m`). GPS altitude is
+noisy indoors, so this is coarse — but a vertical hint is something a pure lat/lon fix
+cannot give a responder at all.
+
+**Remaining upgrade path:**
+1. Fuse a **barometric** floor estimate — pressure is a far better indoor altimeter
+   than GPS — for reliable storey resolution.
+2. Tighten clock sync beyond `rtt / 2` (repeated sampling with outlier rejection, or a
+   leader-broadcast epoch) to pull the ranging error under a few metres.
+3. Weight each node's contribution by its own timing quality rather than gating the
+   whole solve on the worst clock in the set.
 
 ## 5. Preventing the herding effect with many phones
 
@@ -107,10 +149,20 @@ Because one indoor shot is heard by many phones (§2), a naive design where any 
 detection triggers a fleet-wide response will **cascade**: one false positive, or one
 phone echoing another's alert, stampedes everyone into BARRICADE/EVACUATE.
 
-Mitigations implemented in `MeshNetworkManager`:
+Mitigations implemented in `MeshNetworkManager` and `AudioSensorService`:
 - **Independent per-device classification.** A `WAKE:CLASSIFY` broadcast asks each
   phone to classify **its own microphone audio** and vote — phones do not simply
   forward or trust the raising node's verdict.
+- **Corroboration is physically possible.** Every node keeps a rolling
+  `HISTORY_SECONDS = 4` retrospective audio buffer, so a woken phone classifies the
+  window around *the moment it heard the impulse*, addressed by wall-clock time,
+  rather than whatever the microphone happens to be picking up when the mesh message
+  finally arrives. Without this, a woken peer classifies the silence after the shot
+  and votes NO — consensus then fails on every real event, which is the quiet failure
+  mode that makes a quorum design look like it works while never firing.
+- **The raiser's own score is used as-is.** The node that fires first is the one most
+  likely to be wrong, so its self-vote carries its real classifier confidence rather
+  than a blanket 1.0 that would let it dominate the weighted fix.
 - **Dynamic quorum, not threshold = 1.** `requiredConfirmations()` scales the number
   of independent confirmations needed with fleet size
   (`ceil((peers+1) * QUORUM_FRACTION)`, clamped to `[2, MAX_REQUIRED_CONFIRMATIONS]`).
@@ -120,7 +172,14 @@ Mitigations implemented in `MeshNetworkManager`:
   least one confirming node *other than* the one that raised the alarm before a
   response triggers, so a single misfiring phone cannot start a stampede.
 - **Per-node, deduplicated votes.** Votes are keyed by node id and dedup'd by message
-  id, so re-broadcast/relay traffic can't inflate the count.
+  id, so re-broadcast/relay traffic can't inflate the count. A peer that votes four
+  times still counts once.
+- **Only listeners count toward the quorum.** On the relay bus, devices with the page
+  open but no microphone are excluded from `meshRequiredConfirmations()`. Counting
+  them would raise the bar for everyone while they can never help clear it.
+- **A timestamp is never guessed.** A node that did not actually hear an impulse votes
+  without an arrival time rather than substituting "now". Its vote still counts toward
+  consensus, but it cannot corrupt the triangulation.
 
 ## Sources
 

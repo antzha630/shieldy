@@ -1912,6 +1912,418 @@ function escapeHtml(value) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Cross-platform mesh bus.
+//
+// Google Nearby Connections is Android-only, so iOS and Android cannot form a
+// peer-to-peer mesh directly. This server-mediated bus is the shared transport both
+// platforms speak over HTTP + Server-Sent Events: devices subscribe to a stream,
+// raise candidate detections, and vote on each other's detections. The server runs
+// the same anti-herding consensus as the Android mesh and triangulates the source,
+// then broadcasts a response trigger to every connected device regardless of OS.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MESH_QUORUM_FRACTION = 0.34;          // fraction of the fleet that must confirm
+const MESH_MAX_REQUIRED_CONFIRMATIONS = 5;  // cap so large fleets need not be unanimous
+const MESH_FLOOR_HEIGHT_METERS = 3.5;       // nominal storey height for floor offset
+const MESH_VOTE_WINDOW_MS = 6000;           // how long a detection session accepts votes
+const SPEED_OF_SOUND_MPS = 343;             // for TDoA travel-time computation
+// Arrivals spread wider than this cannot be one indoor acoustic event (sound crosses
+// a large building in well under a second), so the clocks are not comparable.
+const MESH_MAX_ARRIVAL_SPREAD_MS = 1500;
+// 0.343 m per ms: 60 ms of clock error is already ~20 m of ranging error.
+const MESH_MAX_TIMING_UNCERTAINTY_MS = 60;
+// Below this, the confirming phones give the solve no geometric leverage.
+const MESH_MIN_BASELINE_METERS = 4;
+
+// deviceId -> { res, lastSeen, latitude, longitude, platform }
+const meshDevices = new Map();
+// sessionId -> { sessionId, sourceDeviceId, startedAtMs, votes: Map<deviceId, vote> }
+const detectionSessions = new Map();
+
+/**
+ * Authorize a write on the mesh bus.
+ *
+ * Two callers, two credentials. A trusted node (the Android relay) presents the
+ * shared relay API key. A browser sensor node cannot hold that key — it is a public
+ * page — so at stream-connect time it is issued a per-device bus token, which it
+ * must present alongside its own deviceId. That binds mesh writes to a device with
+ * a live stream rather than accepting anonymous detections from anywhere.
+ */
+function authenticateMeshWrite(req, deviceId) {
+  if (authenticate(req)) return true;
+  if (!deviceId) return false;
+  const entry = meshDevices.get(deviceId);
+  if (!entry || !entry.busToken) return false;
+  const authorization = req.headers.authorization || "";
+  return authorization === `Bus ${entry.busToken}`;
+}
+
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/**
+ * How many independent confirmations are needed before the fleet responds.
+ *
+ * Only devices that are actually listening count toward the quorum: a viewer with
+ * the page open but no microphone can never confirm, so including it would raise
+ * the bar for everyone and stall real detections.
+ */
+function meshSensorCount() {
+  let count = 0;
+  for (const entry of meshDevices.values()) if (entry.sensor) count++;
+  return count;
+}
+
+function meshRequiredConfirmations() {
+  const fleet = meshSensorCount();
+  if (fleet <= 1) return 1; // solo sensor: local trigger only
+  const scaled = Math.ceil(fleet * MESH_QUORUM_FRACTION);
+  return Math.min(MESH_MAX_REQUIRED_CONFIRMATIONS, Math.max(2, scaled));
+}
+
+function meshBroadcast(event, data, exceptDeviceId = null) {
+  const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const [deviceId, entry] of meshDevices) {
+    if (deviceId === exceptDeviceId) continue;
+    try {
+      entry.res.write(frame);
+    } catch (_) {
+      meshDevices.delete(deviceId);
+    }
+  }
+}
+
+// Coarse TDoA multilateration by grid search. Given confirming devices with positions
+// and audio arrival timestamps on a *shared* clock, the true source is the point that
+// makes (arrival_i - travelTime_i) constant across devices (that constant is the common
+// clock offset). We search a grid around the centroid and pick the point minimising the
+// variance of that quantity. Returns null when there is not enough synchronised timing
+// data, so the caller falls back to the confidence-weighted centroid.
+function triangulateTdoa(located) {
+  // A timestamp is only usable when we also know how well the reporting device's
+  // clock is aligned to ours; an unqualified timestamp must never be treated as good.
+  const timed = located.filter(
+    (v) =>
+      Number.isFinite(v.detectedAtMs) &&
+      Number.isFinite(v.timingUncertaintyMs) &&
+      v.timingUncertaintyMs <= MESH_MAX_TIMING_UNCERTAINTY_MS
+  );
+  if (timed.length < 3) return null;
+
+  const arrivals = timed.map((v) => v.detectedAtMs);
+  const spread = Math.max(...arrivals) - Math.min(...arrivals);
+  if (spread > MESH_MAX_ARRIVAL_SPREAD_MS) return null;
+
+  const lat0 = timed.reduce((s, v) => s + v.latitude, 0) / timed.length;
+  const lon0 = timed.reduce((s, v) => s + v.longitude, 0) / timed.length;
+  const mPerDegLat = 111320;
+  const mPerDegLon = 111320 * Math.cos((lat0 * Math.PI) / 180);
+  const pts = timed.map((v) => ({
+    x: (v.longitude - lon0) * mPerDegLon,
+    y: (v.latitude - lat0) * mPerDegLat,
+    t: v.detectedAtMs / 1000 // seconds
+  }));
+
+  // Without a baseline between the listeners there is nothing to triangulate from.
+  const baseline = Math.max(
+    ...pts.map((a) => Math.max(...pts.map((b) => Math.hypot(a.x - b.x, a.y - b.y))))
+  );
+  if (baseline < MESH_MIN_BASELINE_METERS) return null;
+
+  // Sweep for the point where `arrival - travelTime` is most nearly constant across
+  // listeners: coarse first, then a fine pass inside the winning cell.
+  const sweep = (cx, cy, range, step) => {
+    let best = null;
+    for (let gx = cx - range; gx <= cx + range; gx += step) {
+      for (let gy = cy - range; gy <= cy + range; gy += step) {
+        const offsets = pts.map((p) => p.t - Math.hypot(p.x - gx, p.y - gy) / SPEED_OF_SOUND_MPS);
+        const mean = offsets.reduce((s, o) => s + o, 0) / offsets.length;
+        const variance = offsets.reduce((s, o) => s + (o - mean) ** 2, 0) / offsets.length;
+        if (!best || variance < best.variance) best = { gx, gy, variance };
+      }
+    }
+    return best;
+  };
+
+  let best = sweep(0, 0, 150, 5);
+  if (!best) return null;
+  best = sweep(best.gx, best.gy, 5, 0.5) || best;
+
+  const residualMs = Math.sqrt(best.variance) * 1000;
+  // The fit must be consistent with how well the clocks are actually known.
+  const tolerance = Math.max(10, Math.max(...timed.map((v) => v.timingUncertaintyMs)) * 2);
+  if (residualMs > tolerance) return null;
+
+  return {
+    latitude: lat0 + best.gy / mPerDegLat,
+    longitude: lon0 + best.gx / mPerDegLon,
+    method: "tdoa_multilateration",
+    timingResidualMs: Number(residualMs.toFixed(1))
+  };
+}
+
+// Estimate the source from all confirming votes. Prefers TDoA when synchronised timing
+// is available, else a confidence-weighted centroid. Adds a relative floor offset from
+// altitude spread and a spread radius as a crude confidence bound.
+function meshEstimateSource(session) {
+  const located = [...session.votes.values()].filter(
+    (v) => v.isGunshot && Number.isFinite(v.latitude) && Number.isFinite(v.longitude) &&
+      !(v.latitude === 0 && v.longitude === 0)
+  );
+  if (located.length === 0) return null;
+
+  let base = triangulateTdoa(located);
+  if (!base) {
+    let wSum = 0, latAcc = 0, lonAcc = 0;
+    for (const v of located) {
+      const w = Math.min(1, Math.max(0.05, v.confidence || 0.05));
+      wSum += w; latAcc += v.latitude * w; lonAcc += v.longitude * w;
+    }
+    base = {
+      latitude: latAcc / wSum,
+      longitude: lonAcc / wSum,
+      method: located.length >= 2 ? "weighted_centroid" : "single_report",
+      timingResidualMs: null
+    };
+  }
+
+  const altitudes = located.map((v) => v.altitude).filter(Number.isFinite);
+  const floorOffset = altitudes.length >= 2
+    ? Math.round((Math.max(...altitudes) - Math.min(...altitudes)) / MESH_FLOOR_HEIGHT_METERS)
+    : 0;
+  const spreadMeters = Math.max(
+    0,
+    ...located.map((v) => haversineMeters(base.latitude, base.longitude, v.latitude, v.longitude))
+  );
+
+  return { ...base, floorOffset, spreadMeters, contributingNodes: located.length };
+}
+
+function meshEvaluateSession(session) {
+  const confirmed = [...session.votes.values()].filter((v) => v.isGunshot);
+  const independent = confirmed.filter((v) => v.deviceId !== session.sourceDeviceId);
+  const threshold = meshRequiredConfirmations();
+  const hasPeers = meshSensorCount() > 1;
+  const enough = confirmed.length >= threshold && (!hasPeers || independent.length >= 1);
+  if (!enough || session.triggered) return null;
+
+  session.triggered = true;
+  const estimate = meshEstimateSource(session);
+  session.lastEstimate = estimate;
+  const confirmedByNodes = confirmed.map((v) => v.deviceId);
+
+  // Fold the confirmed, triangulated detection into the incident model so the dispatch
+  // dashboard, Opius client, and notifications all react — same as the Android path.
+  const observedAtMs = Date.now();
+  const incidentId = `incident-mesh-${session.sessionId.slice(0, 8)}`;
+  const incident = incidents.get(incidentId) || createIncident(incidentId, observedAtMs);
+  confirmedByNodes.forEach((n) => addUnique(incident.devices, n));
+  confirmedByNodes.forEach((n) => addUnique(incident.confirmedByNodes, n));
+  if (estimate) {
+    incident.location = { latitude: estimate.latitude, longitude: estimate.longitude };
+  }
+  incident.status = "CONFIRMED_RESPONSE";
+  incident.dispatchRecommended = true;
+  incident.lastObservedAtMs = observedAtMs;
+  incident.updatedAt = nowIso();
+  incident.recommendedAction = recommendationFor(incident);
+  incident.policeBrief = policeBriefFor(incident);
+  incident.medicalBrief = medicalBriefFor(incident);
+  incidents.set(incidentId, incident);
+  scheduleDispatchNotification(incident);
+  session.incidentId = incidentId;
+
+  const trigger = {
+    sessionId: session.sessionId,
+    incidentId,
+    confirmedByNodes,
+    estimate,
+    timestamp: nowIso()
+  };
+  meshBroadcast("response_trigger", trigger);
+  console.log(
+    `[mesh] RESPONSE TRIGGERED session=${session.sessionId} confirmed=${confirmed.length}/${threshold} ` +
+      `method=${estimate ? estimate.method : "none"} spread=${estimate ? estimate.spreadMeters.toFixed(1) : "?"}m ` +
+      `floor=${estimate ? estimate.floorOffset : 0}`
+  );
+  return trigger;
+}
+
+// After a session has triggered, later votes can still sharpen the location — most
+// importantly they can push it from a coarse centroid to a TDoA fix once ≥3 timed
+// confirmations exist. Re-broadcast a refined location when it materially improves.
+function meshMaybeRefine(session) {
+  const estimate = meshEstimateSource(session);
+  if (!estimate) return;
+  const prev = session.lastEstimate;
+  const improved =
+    !prev ||
+    (estimate.method === "tdoa_multilateration" && prev.method !== "tdoa_multilateration") ||
+    estimate.contributingNodes > prev.contributingNodes;
+  if (!improved) return;
+
+  session.lastEstimate = estimate;
+  const incident = incidents.get(session.incidentId);
+  if (incident) {
+    incident.location = { latitude: estimate.latitude, longitude: estimate.longitude };
+    incident.updatedAt = nowIso();
+  }
+  meshBroadcast("location_refined", {
+    sessionId: session.sessionId,
+    incidentId: session.incidentId,
+    estimate,
+    timestamp: nowIso()
+  });
+  console.log(
+    `[mesh] location refined session=${session.sessionId} method=${estimate.method} ` +
+      `nodes=${estimate.contributingNodes} residual=${estimate.timingResidualMs}ms`
+  );
+}
+
+function meshRecordVote(session, vote) {
+  session.votes.set(vote.deviceId, vote);
+  if (!session.triggered) {
+    return meshEvaluateSession(session);
+  }
+  meshMaybeRefine(session);
+  return null;
+}
+
+function handleMeshStream(req, res, params) {
+  const deviceId = params.get("deviceId") || crypto.randomUUID();
+  const busToken = crypto.randomUUID();
+  res.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-store",
+    connection: "keep-alive"
+  });
+  res.write(`event: hello\ndata: ${JSON.stringify({ deviceId, busToken, serverTimeMs: Date.now(), ok: true })}\n\n`);
+
+  meshDevices.set(deviceId, {
+    res,
+    busToken,
+    lastSeen: Date.now(),
+    latitude: numberOrNull(params.get("lat")),
+    longitude: numberOrNull(params.get("lon")),
+    platform: params.get("platform") || "unknown",
+    // Only a device with its microphone on can corroborate a detection.
+    sensor: params.get("sensor") === "1"
+  });
+  console.log(`[mesh] device connected: ${deviceId} (${meshDevices.size} online)`);
+
+  const keepAlive = setInterval(() => {
+    try { res.write(": ping\n\n"); } catch (_) { /* handled on close */ }
+  }, 20000);
+
+  req.on("close", () => {
+    clearInterval(keepAlive);
+    // Only drop the entry if it is still this connection: on a reconnect the newer
+    // stream has already replaced it, and deleting by id alone would evict it.
+    if (meshDevices.get(deviceId)?.res === res) {
+      meshDevices.delete(deviceId);
+    }
+    console.log(`[mesh] device disconnected: ${deviceId} (${meshDevices.size} online)`);
+  });
+}
+
+async function handleMeshDetection(req, res) {
+  let body;
+  try { body = await readJson(req); } catch (e) { json(res, 400, { ok: false, error: `Invalid JSON: ${e.message}` }); return; }
+
+  const deviceId = String(body.deviceId || "").trim();
+  if (!deviceId) { json(res, 400, { ok: false, error: "deviceId required" }); return; }
+  if (!authenticateMeshWrite(req, deviceId)) { json(res, 401, { ok: false, error: "Unauthorized" }); return; }
+
+  const sessionId = crypto.randomUUID();
+  const session = { sessionId, sourceDeviceId: deviceId, startedAtMs: Date.now(), triggered: false, votes: new Map() };
+  detectionSessions.set(sessionId, session);
+  setTimeout(() => detectionSessions.delete(sessionId), MESH_VOTE_WINDOW_MS * 3);
+
+  // The raising device's own detection counts as its vote.
+  meshRecordVote(session, {
+    deviceId,
+    isGunshot: true,
+    confidence: numberOrNull(body.confidence) ?? 1,
+    latitude: numberOrNull(body.latitude) ?? NaN,
+    longitude: numberOrNull(body.longitude) ?? NaN,
+    altitude: numberOrNull(body.altitude) ?? NaN,
+    detectedAtMs: numberOrNull(body.detectedAtMs) ?? Date.now(),
+    timingUncertaintyMs: numberOrNull(body.timingUncertaintyMs) ?? NaN
+  });
+
+  // Ask every other device to classify its own audio and vote.
+  meshBroadcast("wake_classify", {
+    sessionId,
+    sourceDeviceId: deviceId,
+    latitude: numberOrNull(body.latitude),
+    longitude: numberOrNull(body.longitude),
+    at: nowIso()
+  }, deviceId);
+
+  json(res, 202, {
+    ok: true,
+    sessionId,
+    required: meshRequiredConfirmations(),
+    online: meshDevices.size,
+    sensors: meshSensorCount()
+  });
+}
+
+async function handleMeshSensorState(req, res) {
+  let body;
+  try { body = await readJson(req); } catch (e) { json(res, 400, { ok: false, error: `Invalid JSON: ${e.message}` }); return; }
+
+  const deviceId = String(body.deviceId || "").trim();
+  if (!authenticateMeshWrite(req, deviceId)) { json(res, 401, { ok: false, error: "Unauthorized" }); return; }
+  const entry = meshDevices.get(deviceId);
+  if (!entry) { json(res, 404, { ok: false, error: "Device not connected" }); return; }
+
+  entry.sensor = Boolean(body.sensor);
+  if (Number.isFinite(numberOrNull(body.latitude))) entry.latitude = numberOrNull(body.latitude);
+  if (Number.isFinite(numberOrNull(body.longitude))) entry.longitude = numberOrNull(body.longitude);
+  entry.lastSeen = Date.now();
+
+  console.log(`[mesh] ${deviceId} listening=${entry.sensor} (${meshSensorCount()} sensors online)`);
+  json(res, 200, { ok: true, sensors: meshSensorCount(), required: meshRequiredConfirmations() });
+}
+
+async function handleMeshVote(req, res) {
+  let body;
+  try { body = await readJson(req); } catch (e) { json(res, 400, { ok: false, error: `Invalid JSON: ${e.message}` }); return; }
+
+  const sessionId = String(body.sessionId || "").trim();
+  const deviceId = String(body.deviceId || "").trim();
+  if (!deviceId) { json(res, 400, { ok: false, error: "deviceId required" }); return; }
+  if (!authenticateMeshWrite(req, deviceId)) { json(res, 401, { ok: false, error: "Unauthorized" }); return; }
+  const session = detectionSessions.get(sessionId);
+  if (!session) { json(res, 404, { ok: false, error: "Unknown or expired session" }); return; }
+  if (Date.now() - session.startedAtMs > MESH_VOTE_WINDOW_MS) {
+    json(res, 409, { ok: false, error: "Vote window closed" }); return;
+  }
+
+  const trigger = meshRecordVote(session, {
+    deviceId,
+    isGunshot: Boolean(body.isGunshot),
+    confidence: numberOrNull(body.confidence) ?? 0,
+    latitude: numberOrNull(body.latitude) ?? NaN,
+    longitude: numberOrNull(body.longitude) ?? NaN,
+    altitude: numberOrNull(body.altitude) ?? NaN,
+    detectedAtMs: numberOrNull(body.detectedAtMs) ?? Date.now(),
+    timingUncertaintyMs: numberOrNull(body.timingUncertaintyMs) ?? NaN
+  });
+
+  const confirmed = [...session.votes.values()].filter((v) => v.isGunshot).length;
+  json(res, 202, { ok: true, sessionId, confirmed, required: meshRequiredConfirmations(), triggered: Boolean(trigger) });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Opius — mobile-framed user-facing client (the cross-platform / iOS relay app).
 // Faithful to the Opius prototype (Home / Chat / Update tabs) but wired to the
 // live relay endpoints instead of mock state. Served at GET /app.
@@ -2037,7 +2449,9 @@ function opiusAppHtml() {
         <div class="radar"><div class="ring"></div><div class="ring d"></div><div class="core"></div></div>
         <div style="font-size:22px;font-weight:800;letter-spacing:-.3px;">Opius</div>
         <div class="pill" id="idlePill"><span class="dot"></span><span id="idlePillText">Listening</span></div>
-        <div style="font-size:13.5px;color:var(--text-3);line-height:1.5;max-width:240px;">Opius is quietly listening in the background. Nothing to see here — you'll be notified the moment something needs your attention.</div>
+        <div style="font-size:13.5px;color:var(--text-3);line-height:1.5;max-width:260px;" id="idleBlurb">Opius will alert you the moment something needs your attention. Turn on listening mode to also let this phone help detect and locate an incident.</div>
+        <button class="btn-pill" id="sensorToggle" style="padding:11px 20px;font-size:13.5px;">Turn on listening mode</button>
+        <div id="sensorReadout" style="font-size:11.5px;color:var(--text-3);line-height:1.6;max-width:270px;"></div>
       </div>
       <div id="homeIncident" style="display:none;">
         <div class="row" style="padding:14px 20px 10px;">
@@ -2134,15 +2548,34 @@ function opiusAppHtml() {
     });
   });
 
+  // Transient top-of-screen notice, used when a confirmed detection arrives on the
+  // mesh stream so the user is not waiting on the next poll.
+  var bannerTimer = null;
+  function banner(text) {
+    var el = $("topAlert");
+    el.textContent = text;
+    el.style.display = "block";
+    if (bannerTimer) clearTimeout(bannerTimer);
+    bannerTimer = setTimeout(function () { el.style.display = "none"; }, 12000);
+  }
+
+  // Whether this device's own microphone is helping detect, which is a different
+  // thing from whether it is receiving alerts — the pill should not claim otherwise.
+  var sensorListening = false;
+  var lastStatusActive = false;
+  function refreshStatusPill() { setStatusPill(lastStatusActive); }
+
   function setStatusPill(active) {
+    lastStatusActive = active;
     var pill = $("statusPill"), dot = pill.querySelector(".dot");
     var idlePill = $("idlePill"), idleDot = idlePill.querySelector(".dot");
     if (active) {
       pill.style.background = "var(--danger-light)"; pill.style.color = "var(--danger)"; dot.style.background = "var(--danger)"; $("statusText").textContent = "Active Alert";
       idlePill.style.background = "var(--danger-light)"; idlePill.style.color = "var(--danger)"; idleDot.style.background = "var(--danger)"; $("idlePillText").textContent = "Active Alert";
     } else {
-      pill.style.background = "var(--safe-light)"; pill.style.color = "oklch(40% 0.1 145)"; dot.style.background = "var(--safe)"; $("statusText").textContent = "Listening";
-      idlePill.style.background = "var(--safe-light)"; idlePill.style.color = "oklch(40% 0.1 145)"; idleDot.style.background = "var(--safe)"; $("idlePillText").textContent = "Listening";
+      var idleLabel = sensorListening ? "Listening" : "Alerts on";
+      pill.style.background = "var(--safe-light)"; pill.style.color = "oklch(40% 0.1 145)"; dot.style.background = "var(--safe)"; $("statusText").textContent = idleLabel;
+      idlePill.style.background = "var(--safe-light)"; idlePill.style.color = "oklch(40% 0.1 145)"; idleDot.style.background = "var(--safe)"; $("idlePillText").textContent = idleLabel;
     }
   }
 
@@ -2255,6 +2688,380 @@ function opiusAppHtml() {
   }
   $("pullBtn").addEventListener("click", refresh);
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // Sensor node: this page as a listening member of the mesh.
+  //
+  // Google Nearby is Android-only, so an iPhone cannot join the peer-to-peer mesh
+  // directly. It can, however, do everything that actually matters over this relay:
+  // listen on its own microphone, raise a candidate detection, vote on detections
+  // raised by other phones, and receive the confirmed response. That is what makes
+  // an iOS device a participant rather than a spectator.
+  //
+  // Honest limits, stated plainly in the UI too:
+  //  - This is an *impulsive transient* detector (peak level, crest factor, rise
+  //    over the running background, microphone clipping) — not a trained gunshot
+  //    classifier like the Android node's YAMNet head. It corroborates; it should
+  //    not be the only thing that ever fires.
+  //  - Listening mode is explicit and user-visible, which is both the honest design
+  //    and the only pattern Apple permits.
+  // ───────────────────────────────────────────────────────────────────────────
+  var Sensor = (function () {
+    var BUFFER_SIZE = 1024;
+    var PEAK_MIN = 0.35;        // absolute level that could be an impulse nearby
+    var CREST_MIN = 4.0;        // peak/RMS: impulses are peaky, speech and music are not
+    var SNR_MIN = 6.0;          // rise over the running background level
+    var CLIP_GATE = 0.005;      // 0.5% of samples railed: a very close, loud event
+    var IMPULSE_MEMORY_MS = 3000;
+    var RAISE_COOLDOWN_MS = 6000;
+    var BACKGROUND_ALPHA = 0.02;
+
+    var enabled = false;
+    var audioCtx = null, micStream = null, processor = null, micSource = null;
+    var background = 0.01;
+    var lastImpulse = null;      // { atServerMs, confidence, peak, crest, clipFraction }
+    var lastRaiseAtMs = 0;
+    var stream = null;           // EventSource
+    var deviceId = null;
+    var busToken = null;         // per-device credential for mesh writes
+    var clockOffsetMs = 0;       // server clock minus this device's clock
+    var clockUncertaintyMs = NaN;
+    var position = null;         // { latitude, longitude, altitude }
+    var onTrigger = function () {};
+
+    function readout(html) { $("sensorReadout").innerHTML = html; }
+
+    function busPost(path, body) {
+      return api(path, {
+        method: "POST",
+        headers: busToken ? { authorization: "Bus " + busToken } : {},
+        body: JSON.stringify(body)
+      });
+    }
+
+    function deviceIdentity() {
+      try {
+        var stored = localStorage.getItem("opius-device-id");
+        if (stored) return stored;
+        var made = "opius-" + Math.random().toString(36).slice(2, 10);
+        localStorage.setItem("opius-device-id", made);
+        return made;
+      } catch (e) {
+        return "opius-" + Math.random().toString(36).slice(2, 10);
+      }
+    }
+
+    // NTP-style: several round trips, keep the one with the lowest delay, because a
+    // fast round trip bounds how wrong the offset can be. Sound covers 0.343 m per
+    // millisecond, so this is what arrival-time triangulation ultimately rests on.
+    function syncClock() {
+      var samples = [];
+      function once() {
+        var t1 = Date.now();
+        return fetch("/v1/time", { cache: "no-store" })
+          .then(function (r) { return r.json(); })
+          .then(function (body) {
+            var t4 = Date.now();
+            var rtt = t4 - t1;
+            var offset = body.serverTimeMs - (t1 + t4) / 2;
+            samples.push({ offset: offset, rtt: rtt });
+          })
+          .catch(function () { /* keep whatever we already had */ });
+      }
+      return once().then(once).then(once).then(once).then(once).then(function () {
+        if (!samples.length) return;
+        samples.sort(function (a, b) { return a.rtt - b.rtt; });
+        clockOffsetMs = samples[0].offset;
+        clockUncertaintyMs = samples[0].rtt / 2;
+      });
+    }
+
+    function watchPosition() {
+      if (!navigator.geolocation) return;
+      navigator.geolocation.watchPosition(
+        function (pos) {
+          position = {
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+            altitude: typeof pos.coords.altitude === "number" ? pos.coords.altitude : null
+          };
+        },
+        function () { /* a vote without a position still counts toward consensus */ },
+        { enableHighAccuracy: true, maximumAge: 15000, timeout: 15000 }
+      );
+    }
+
+    function connectStream(isSensor) {
+      if (stream) { stream.close(); stream = null; }
+      var query = "?deviceId=" + encodeURIComponent(deviceId) +
+        "&platform=" + encodeURIComponent(platformLabel()) +
+        "&sensor=" + (isSensor ? "1" : "0");
+      if (position) {
+        query += "&lat=" + position.latitude + "&lon=" + position.longitude;
+      }
+      stream = new EventSource("/v1/mesh/stream" + query);
+
+      // The relay issues a per-device token on connect; mesh writes carry it, since
+      // a public page cannot hold the shared relay key.
+      stream.addEventListener("hello", function (event) {
+        var data = JSON.parse(event.data);
+        busToken = data.busToken || null;
+        // The hello frame is also a free clock sample from the server.
+        if (typeof data.serverTimeMs === "number" && !isFinite(clockUncertaintyMs)) {
+          clockOffsetMs = data.serverTimeMs - Date.now();
+        }
+      });
+
+      // Another phone thinks it heard a shot: check our own microphone and vote.
+      stream.addEventListener("wake_classify", function (event) {
+        var data = JSON.parse(event.data);
+        castVote(data.sessionId);
+      });
+
+      stream.addEventListener("response_trigger", function (event) {
+        onTrigger(JSON.parse(event.data), "confirmed");
+      });
+
+      // Later votes can sharpen the fix — most importantly from a coarse cluster
+      // centroid to a real arrival-time solve. That is an update to the same
+      // incident, not a second one, and must not be announced as a new alert.
+      stream.addEventListener("location_refined", function (event) {
+        onTrigger(JSON.parse(event.data), "refined");
+      });
+    }
+
+    function platformLabel() {
+      var ua = navigator.userAgent || "";
+      if (/iPhone|iPad|iPod/i.test(ua)) return "ios-web";
+      if (/Android/i.test(ua)) return "android-web";
+      return "web";
+    }
+
+    function recentImpulse() {
+      if (!lastImpulse) return null;
+      var ageMs = (Date.now() + clockOffsetMs) - lastImpulse.atServerMs;
+      return ageMs >= 0 && ageMs <= IMPULSE_MEMORY_MS ? lastImpulse : null;
+    }
+
+    function timingUncertaintyMs() {
+      if (!audioCtx) return NaN;
+      var bufferMs = (BUFFER_SIZE / audioCtx.sampleRate) * 1000;
+      // Clock offset error, plus where inside the buffer the callback lands.
+      return (clockUncertaintyMs || 25) + bufferMs / 2;
+    }
+
+    function castVote(sessionId) {
+      var impulse = recentImpulse();
+      var body = {
+        deviceId: deviceId,
+        sessionId: sessionId,
+        isGunshot: Boolean(impulse),
+        confidence: impulse ? impulse.confidence : 0
+      };
+      if (position) {
+        body.latitude = position.latitude;
+        body.longitude = position.longitude;
+        if (position.altitude !== null) body.altitude = position.altitude;
+      }
+      // Only claim an arrival time when we actually heard something — a guessed
+      // timestamp would quietly corrupt everyone else's triangulation.
+      if (impulse) {
+        body.detectedAtMs = impulse.atServerMs;
+        body.timingUncertaintyMs = impulse.timingUncertaintyMs;
+      }
+      busPost("/v1/mesh/votes", body);
+    }
+
+    function raiseDetection(impulse) {
+      var now = Date.now();
+      if (now - lastRaiseAtMs < RAISE_COOLDOWN_MS) return;
+      lastRaiseAtMs = now;
+
+      var body = {
+        deviceId: deviceId,
+        confidence: impulse.confidence,
+        detectedAtMs: impulse.atServerMs,
+        timingUncertaintyMs: impulse.timingUncertaintyMs
+      };
+      if (position) {
+        body.latitude = position.latitude;
+        body.longitude = position.longitude;
+        if (position.altitude !== null) body.altitude = position.altitude;
+      }
+      busPost("/v1/mesh/detections", body);
+      render("Impulse detected — asking nearby devices to confirm.");
+    }
+
+    function onAudio(event) {
+      var samples = event.inputBuffer.getChannelData(0);
+      var count = samples.length;
+      var sumSquares = 0, peak = 0, peakIndex = 0, clipped = 0;
+      for (var i = 0; i < count; i++) {
+        var value = samples[i];
+        sumSquares += value * value;
+        var magnitude = value < 0 ? -value : value;
+        if (magnitude > peak) { peak = magnitude; peakIndex = i; }
+        if (magnitude >= 0.98) clipped++;
+      }
+      var rms = Math.sqrt(sumSquares / count);
+      var crest = rms > 0 ? peak / rms : 0;
+      var clipFraction = clipped / count;
+
+      // Track the background level only on quiet frames, so the event itself can
+      // never raise the bar it has to clear.
+      if (rms < background * 3) {
+        background = (1 - BACKGROUND_ALPHA) * background + BACKGROUND_ALPHA * rms;
+      }
+      var snr = rms / Math.max(background, 1e-4);
+
+      var impulsive = (peak >= PEAK_MIN && crest >= CREST_MIN && snr >= SNR_MIN) ||
+        clipFraction >= CLIP_GATE;
+      if (!impulsive) return;
+
+      // Timestamp the impulse itself, not the callback: locate the peak inside the
+      // buffer and subtract the samples that follow it.
+      var sampleRate = audioCtx.sampleRate;
+      var onsetLocalMs = Date.now() - ((count - peakIndex) / sampleRate) * 1000;
+
+      var confidence = Math.min(1, Math.max(0.15,
+        0.25 * Math.min(1, peak / 0.9) +
+        0.35 * Math.min(1, crest / 12) +
+        0.25 * Math.min(1, snr / 25) +
+        0.15 * Math.min(1, clipFraction / 0.02)
+      ));
+
+      lastImpulse = {
+        atServerMs: onsetLocalMs + clockOffsetMs,
+        confidence: confidence,
+        peak: peak,
+        crest: crest,
+        clipFraction: clipFraction,
+        timingUncertaintyMs: timingUncertaintyMs()
+      };
+      raiseDetection(lastImpulse);
+    }
+
+    function render(note) {
+      var blurb = $("idleBlurb");
+      if (!enabled) {
+        // The blurb above the button already explains the off state; repeating it
+        // here just crowds the screen.
+        if (blurb) blurb.style.display = "";
+        readout("");
+        return;
+      }
+      if (blurb) blurb.style.display = "none";
+      var lines = [];
+      lines.push("<strong>Listening on this phone.</strong> Detecting sudden, loud impulsive " +
+        "sounds and corroborating what nearby devices hear.");
+      if (isFinite(clockUncertaintyMs)) {
+        lines.push("Clock synced to within " + Math.round(clockUncertaintyMs) + " ms — needed for triangulation.");
+      }
+      lines.push(position
+        ? "Position shared for triangulation."
+        : "No position yet — this device can confirm, but cannot help locate.");
+      if (lastImpulse) {
+        var ago = Math.round(((Date.now() + clockOffsetMs) - lastImpulse.atServerMs) / 1000);
+        lines.push("Last impulse " + ago + "s ago (confidence " + lastImpulse.confidence.toFixed(2) + ").");
+      }
+      if (note) lines.push(note);
+      readout(lines.join("<br>"));
+    }
+
+    function start() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        readout("This browser cannot access the microphone.");
+        return;
+      }
+      navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      }).then(function (mediaStream) {
+        micStream = mediaStream;
+        var Ctx = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new Ctx();
+        if (audioCtx.state === "suspended") audioCtx.resume();
+        micSource = audioCtx.createMediaStreamSource(mediaStream);
+        processor = audioCtx.createScriptProcessor(BUFFER_SIZE, 1, 1);
+        processor.onaudioprocess = onAudio;
+        micSource.connect(processor);
+        // Safari will not run the processor unless it reaches a destination; a muted
+        // gain node keeps the graph alive without playing anything back.
+        var mute = audioCtx.createGain();
+        mute.gain.value = 0;
+        processor.connect(mute);
+        mute.connect(audioCtx.destination);
+
+        enabled = true;
+        sensorListening = true;
+        refreshStatusPill();
+        $("sensorToggle").textContent = "Turn off listening mode";
+        watchPosition();
+        syncClock().then(function () {
+          announceSensorState(true);
+          render();
+        });
+      }).catch(function () {
+        readout("Microphone permission is needed for listening mode.");
+      });
+    }
+
+    function announceSensorState(isSensor) {
+      busPost("/v1/mesh/sensor-state", {
+        deviceId: deviceId,
+        sensor: isSensor,
+        latitude: position ? position.latitude : undefined,
+        longitude: position ? position.longitude : undefined
+      });
+    }
+
+    function stop() {
+      enabled = false;
+      if (processor) { processor.disconnect(); processor.onaudioprocess = null; processor = null; }
+      if (micSource) { micSource.disconnect(); micSource = null; }
+      if (micStream) { micStream.getTracks().forEach(function (t) { t.stop(); }); micStream = null; }
+      if (audioCtx) { audioCtx.close(); audioCtx = null; }
+      lastImpulse = null;
+      sensorListening = false;
+      refreshStatusPill();
+      $("sensorToggle").textContent = "Turn on listening mode";
+      announceSensorState(false);
+      render();
+    }
+
+    return {
+      init: function (triggerHandler) {
+        onTrigger = triggerHandler || function () {};
+        deviceId = deviceIdentity();
+        // Receive confirmed alerts even when not listening: everyone in the building
+        // needs the response, whether or not their microphone is helping detect it.
+        syncClock().then(function () { connectStream(false); });
+        $("sensorToggle").addEventListener("click", function () {
+          if (enabled) stop(); else start();
+        });
+        render();
+        setInterval(function () { if (enabled) render(); }, 4000);
+      }
+    };
+  })();
+
+  Sensor.init(function (trigger, kind) {
+    // A confirmed detection: surface it immediately rather than waiting for the
+    // next five-second poll.
+    var estimate = trigger.estimate || {};
+    var detail;
+    if (kind === "refined") {
+      detail = estimate.method === "tdoa_multilateration"
+        ? "Location narrowed down from arrival times across " + estimate.contributingNodes + " devices."
+        : "Location updated as more devices reported in.";
+    } else {
+      var nodes = (trigger.confirmedByNodes || []).length;
+      detail = "Confirmed by " + (nodes ? nodes + " devices" : "multiple devices") + " nearby.";
+    }
+    if (estimate.floorOffset) {
+      detail += " Approximately " + estimate.floorOffset + " floor(s) above the lowest device.";
+    }
+    banner(detail);
+    refresh();
+  });
   setStatusPill(false);
   renderChat();
   buildingOptions();
@@ -2287,6 +3094,58 @@ async function route(req, res) {
 
   if (req.method === "GET" && (pathname === "/app" || pathname === "/opius")) {
     text(res, 200, opiusAppHtml(), "text/html; charset=utf-8");
+    return;
+  }
+
+  // Shared time base. Browser sensor nodes have no common clock with each other,
+  // so each one measures its offset to this server (NTP style, keeping the
+  // lowest-round-trip sample) and reports detection times on the server's clock.
+  // Without this, arrival-time triangulation across phones is meaningless.
+  if (req.method === "GET" && pathname === "/v1/time") {
+    json(res, 200, { ok: true, serverTimeMs: Date.now() });
+    return;
+  }
+
+  // Cross-platform mesh bus (Android + iOS interoperate over HTTP/SSE).
+  if (req.method === "GET" && pathname === "/v1/mesh/stream") {
+    handleMeshStream(req, res, url.searchParams);
+    return;
+  }
+  if (req.method === "GET" && pathname === "/v1/mesh/status") {
+    json(res, 200, {
+      ok: true,
+      online: meshDevices.size,
+      sensors: meshSensorCount(),
+      required: meshRequiredConfirmations(),
+      devices: [...meshDevices.entries()].map(([deviceId, entry]) => ({
+        deviceId,
+        platform: entry.platform,
+        sensor: Boolean(entry.sensor),
+        latitude: entry.latitude,
+        longitude: entry.longitude
+      })),
+      sessions: [...detectionSessions.values()].map((session) => ({
+        sessionId: session.sessionId,
+        sourceDeviceId: session.sourceDeviceId,
+        triggered: Boolean(session.triggered),
+        confirmations: [...session.votes.values()].filter((v) => v.isGunshot).length,
+        votes: session.votes.size,
+        estimate: session.lastEstimate || null
+      }))
+    });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/v1/mesh/detections") {
+    await handleMeshDetection(req, res);
+    return;
+  }
+  if (req.method === "POST" && pathname === "/v1/mesh/votes") {
+    await handleMeshVote(req, res);
+    return;
+  }
+  if (req.method === "POST" && pathname === "/v1/mesh/sensor-state") {
+    await handleMeshSensorState(req, res);
     return;
   }
 
