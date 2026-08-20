@@ -1552,7 +1552,7 @@ async function handleIncidentReport(req, res) {
 }
 
 async function handleNote(req, res, incidentId) {
-  if (!authenticate(req)) {
+  if (!authenticateUserWrite(req)) {
     json(res, 401, { ok: false, error: "Unauthorized" });
     return;
   }
@@ -1601,7 +1601,7 @@ async function handleNote(req, res, incidentId) {
 }
 
 async function handleAuthorityMessage(req, res, incidentId) {
-  if (!authenticate(req)) {
+  if (!authenticateUserWrite(req)) {
     json(res, 401, { ok: false, error: "Unauthorized" });
     return;
   }
@@ -1949,6 +1949,18 @@ const detectionSessions = new Map();
  * must present alongside its own deviceId. That binds mesh writes to a device with
  * a live stream rather than accepting anonymous detections from anywhere.
  */
+function authenticateUserWrite(req) {
+  if (authenticate(req)) return true;
+  const authorization = req.headers.authorization || "";
+  if (!authorization.startsWith("Bus ")) return false;
+  const token = authorization.slice(4);
+  if (!token) return false;
+  for (const entry of meshDevices.values()) {
+    if (entry.busToken === token) return true;
+  }
+  return false;
+}
+
 function authenticateMeshWrite(req, deviceId) {
   if (authenticate(req)) return true;
   if (!deviceId) return false;
@@ -2513,7 +2525,6 @@ function opiusAppHtml() {
 
 <script>
 (function () {
-  var APP_API_KEY = ${JSON.stringify(API_KEY)};
   var DEFAULT_BUILDINGS = ["Fowler Hall", "Engineering Quad", "Library", "Student Union"];
   var form = { people: 1, injured: 0, critical: 0 };
   var incident = null;
@@ -2523,9 +2534,9 @@ function opiusAppHtml() {
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" })[c]; }); }
   function api(path, opts) {
     opts = opts || {};
-    var headers = Object.assign({ "content-type": "application/json" }, opts.headers || {});
-    if (APP_API_KEY) headers.authorization = "Bearer " + APP_API_KEY;
-    opts.headers = headers;
+    // Caller-supplied credentials win: mesh writes carry their own per-device
+    // "Bus <token>" authorization, which must not be overwritten here.
+    opts.headers = Object.assign({ "content-type": "application/json" }, opts.headers || {});
     return fetch(path, opts).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (data) {
         if (!r.ok) {
@@ -2625,6 +2636,7 @@ function opiusAppHtml() {
     renderChat();
     if (incident && incident.id) {
       api("/v1/incidents/" + encodeURIComponent(incident.id) + "/authority-messages", {
+        headers: Sensor.authHeaders(),
         method: "POST",
         body: JSON.stringify({ sender: "Community member", role: "user", message: text })
       }).then(function () {
@@ -2670,7 +2682,7 @@ function opiusAppHtml() {
       $("statusSent").innerHTML = '<div class="sent"><div class="k">✓ Sent to responders at ' + esc(now) + '</div><div class="v">' + esc(summary) + "</div></div>";
     }
     if (incident && incident.id) {
-      api("/v1/incidents/" + encodeURIComponent(incident.id) + "/notes", { method: "POST", body: JSON.stringify(body) })
+      api("/v1/incidents/" + encodeURIComponent(incident.id) + "/notes", { method: "POST", headers: Sensor.authHeaders(), body: JSON.stringify(body) })
         .then(showSent).catch(function () {
           $("statusSent").innerHTML = '<div class="sent" style="background:var(--danger-light)"><div class="k" style="color:var(--danger)">Couldn\\'t send — will retry</div><div class="v">' + esc(summary) + "</div></div>";
         });
@@ -2730,11 +2742,24 @@ function opiusAppHtml() {
 
     function readout(html) { $("sensorReadout").innerHTML = html; }
 
+    // api() rejects on any non-2xx, and some failures here are entirely normal —
+    // voting on a session that has already closed returns 404, and losing the stream
+    // invalidates the bus token. Handle them here so a routine race cannot surface as
+    // an unhandled rejection, and report the ones a user can act on.
     function busPost(path, body) {
       return api(path, {
         method: "POST",
         headers: busToken ? { authorization: "Bus " + busToken } : {},
         body: JSON.stringify(body)
+      }).catch(function (error) {
+        if (error && error.status === 401) {
+          // The stream dropped and took the token with it; the EventSource will
+          // reconnect on its own and issue a new one.
+          busToken = null;
+        } else if (error && error.status !== 404 && error.status !== 409) {
+          render("Could not reach the response relay — retrying.");
+        }
+        return null;
       });
     }
 
@@ -3028,6 +3053,10 @@ function opiusAppHtml() {
     }
 
     return {
+      // The chat and status-report tabs authenticate with the same per-device token.
+      authHeaders: function () {
+        return busToken ? { authorization: "Bus " + busToken } : {};
+      },
       init: function (triggerHandler) {
         onTrigger = triggerHandler || function () {};
         deviceId = deviceIdentity();
